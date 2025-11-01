@@ -1,0 +1,1293 @@
+import tkinter as tk
+from tkinter import ttk, scrolledtext, messagebox, filedialog
+import threading
+import time
+import json
+import os
+import zipfile
+import shutil
+from datetime import datetime
+import requests
+# 导入用于处理Markdown的库
+import re
+
+class OPAIApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("OnPython AI (OPAI)")
+        self.root.geometry("800x600")
+        
+        # 配置文件路径
+        self.config_file = "config.json"
+        self.data_dir = "data"
+        self.onpython_dir = os.path.join(self.data_dir, "OnPython")
+        
+        # 记忆库存储路径
+        self.memory_file = "memory.json"
+        self.memory = {
+            "programs": {},  # 已导入的程序
+            "summaries": []  # 对话总结
+        }
+        
+        # 加载配置
+        self.config = self.load_config()
+        
+        # 初始化记忆库
+        self.load_memory()
+        
+        # 初始化对话历史记录
+        self.conversation_history = []
+        
+        # 初始化上下文消息列表（用于API调用）
+        self.context_messages = [
+            {"role": "system", "content": self.config["system_prompt"]}
+        ]
+        
+        # 创建主界面
+        self.create_widgets()
+    
+    def create_widgets(self):
+        """创建主界面组件"""
+        # 创建菜单栏
+        menubar = tk.Menu(self.root)
+        self.root.config(menu=menubar)
+        
+        # 文件菜单
+        file_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="文件", menu=file_menu)
+        file_menu.add_command(label="导入 .opai 文件", command=self.import_opai_file)
+        file_menu.add_command(label="清除对话上下文", command=self.clear_context)
+        file_menu.add_separator()
+        file_menu.add_command(label="退出", command=self.root.quit)
+        
+        # 创建对话记录框
+        self.chat_frame = ttk.Frame(self.root)
+        self.chat_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        self.chat_display = scrolledtext.ScrolledText(
+            self.chat_frame, 
+            wrap=tk.WORD, 
+            state=tk.DISABLED,
+            font=("微软雅黑", 10)
+        )
+        self.chat_display.pack(fill=tk.BOTH, expand=True)
+        
+        # 创建输入区域
+        self.input_frame = ttk.Frame(self.root)
+        self.input_frame.pack(fill=tk.X, padx=10, pady=(0, 10))
+        
+        # 聊天输入框
+        self.user_input = tk.Text(
+            self.input_frame, 
+            height=3,
+            font=("微软雅黑", 10)
+        )
+        self.user_input.pack(fill=tk.X, side=tk.LEFT, expand=True, padx=(0, 10))
+        self.user_input.bind("<Return>", self.handle_enter_key)
+        
+        # 发送/停止按钮
+        self.send_button = ttk.Button(
+            self.input_frame,
+            text="发送",
+            command=self.send_message
+        )
+        self.send_button.pack(side=tk.RIGHT)
+        
+        # 设置按钮
+        self.settings_button = ttk.Button(
+            self.input_frame,
+            text="设置",
+            command=self.open_settings
+        )
+        self.settings_button.pack(side=tk.RIGHT, padx=(0, 5))
+        
+        # 显示欢迎信息
+        self.display_message("系统", "欢迎使用OnPython AI (OPAI)！我可以帮助您编写程序、执行系统命令，或与您聊天。")
+        
+        # 启动记忆库定期总结任务
+        self.start_memory_summarization()
+    
+    def clear_context(self):
+        """清除对话上下文，开始新的对话"""
+        # 保留系统提示词，清除用户和AI的消息
+        system_prompt = self.config["system_prompt"]
+        self.context_messages = [{"role": "system", "content": system_prompt}]
+        self.display_message("系统", "对话上下文已清除，现在开始新的对话。")
+    
+    def import_opai_file(self):
+        """导入 .opai 文件"""
+        file_path = filedialog.askopenfilename(
+            title="选择 .opai 文件",
+            filetypes=[("OPAI files", "*.opai"), ("All files", "*.*")]
+        )
+        
+        if not file_path:
+            return  # 用户取消了选择
+        
+        try:
+            self.process_opai_file(file_path)
+        except Exception as e:
+            messagebox.showerror("错误", f"导入 .opai 文件失败: {str(e)}")
+    
+    def process_opai_file(self, file_path):
+        """处理 .opai 文件"""
+        with zipfile.ZipFile(file_path, 'r') as zip_file:
+            # 获取所有文件名
+            file_list = zip_file.namelist()
+            
+            # 查找 com.txt 文件 (根据规范，应该是 "程序名字"com.txt 格式)
+            com_files = [f for f in file_list if f.endswith('com.txt')]
+            
+            if not com_files:
+                raise FileNotFoundError("未在 .opai 文件中找到 com.txt 文件")
+            
+            # 使用第一个找到的 com.txt 文件
+            com_file = com_files[0]
+            
+            # 提取并读取 com.txt 文件内容
+            with zip_file.open(com_file) as txt_file:
+                content = txt_file.read().decode('utf-8')
+            
+            # 提取程序名称 (从文件名中获取，去除 "com.txt")
+            program_name = com_file.replace('com.txt', '').split('/')[-1]  # 获取文件名部分
+            
+            # 显示导入信息
+            self.display_message("系统", f"正在导入程序: {program_name}")
+            self.display_message("系统", f"命令行用法:\n{content}")
+            
+            # 复制 .py 或 .exe 文件到 data/OnPython 目录
+            for file_name in file_list:
+                if file_name.lower().endswith(('.py', '.exe')):
+                    # 提取文件名
+                    actual_file_name = file_name.split('/')[-1]
+                    
+                    # 创建目标路径
+                    target_path = os.path.join(self.onpython_dir, actual_file_name)
+                    
+                    # 从压缩包中提取文件到目标路径
+                    with zip_file.open(file_name) as source_file:
+                        with open(target_path, 'wb') as target_file:
+                            target_file.write(source_file.read())
+                    
+                    self.display_message("系统", f"已将 {actual_file_name} 复制到 {self.onpython_dir} 目录")
+            
+            # 将程序信息保存到记忆库
+            self.memory["programs"][program_name] = {
+                "name": program_name,
+                "usage": content,
+                "location": self.onpython_dir,
+                "added_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            }
+            
+            # 保存记忆库
+            self.save_memory()
+            
+            self.display_message("系统", f"程序 {program_name} 导入完成，并已记录到记忆库中！")
+    
+    def start_memory_summarization(self):
+        """启动记忆库定期总结任务"""
+        # 每30分钟执行一次总结任务（实际应用中可能需要更长的时间间隔）
+        self.root.after(30 * 60 * 1000, self.create_memory_summary)  # 30分钟 = 30*60*1000毫秒
+    
+    def create_memory_summary(self):
+        """创建记忆库总结"""
+        # 获取当前时间
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        # 分析对话历史
+        user_messages = [entry for entry in self.conversation_history if entry["sender"] == "用户"]
+        ai_messages = [entry for entry in self.conversation_history if entry["sender"] == "AI"]
+        system_messages = [entry for entry in self.conversation_history if entry["sender"] == "系统"]
+        
+        # 生成总结内容
+        summary_content = f"定期总结 - {current_time}\n"
+        summary_content += f"- 本次会话期间，用户发送了 {len(user_messages)} 条消息\n"
+        summary_content += f"- AI回复了 {len(ai_messages)} 条消息\n"
+        summary_content += f"- 系统发送了 {len(system_messages)} 条消息\n"
+        summary_content += f"- 当前已导入 {len(self.memory['programs'])} 个程序到记忆库\n"
+        
+        # 如果有用户消息，添加最近的几条
+        if user_messages:
+            summary_content += "- 最近的用户请求:\n"
+            # 显示最近的3条用户消息
+            recent_user_msgs = user_messages[-3:]
+            for msg in recent_user_msgs:
+                msg_preview = msg["message"][:50] + "..." if len(msg["message"]) > 50 else msg["message"]
+                summary_content += f"  * {msg_preview}\n"
+        
+        # 创建总结条目
+        summary = {
+            "date": current_time,
+            "type": "periodic_summary",
+            "content": summary_content
+        }
+        
+        # 添加到记忆库的总结列表
+        self.memory["summaries"].append(summary)
+        
+        # 限制总结数量，只保留最近的10条
+        if len(self.memory["summaries"]) > 10:
+            self.memory["summaries"] = self.memory["summaries"][-10:]
+        
+        # 保存记忆库
+        self.save_memory()
+        
+        # 显示提示信息（不直接显示在聊天窗口中，以免打扰用户）
+        print(f"记忆库总结已创建于 {current_time}")
+        
+        # 继续设置下一次的总结任务
+        self.start_memory_summarization()
+    
+    def handle_enter_key(self, event):
+        """处理回车键事件，如果同时按下Shift则换行，否则发送消息"""
+        if event.state & 0x1:  # Shift键被按下
+            return  # 允许换行
+        else:
+            self.send_message()  # 发送消息
+            return "break"  # 阻止默认换行行为
+    
+    def display_message(self, sender, message):
+        """在对话记录框中显示消息"""
+        self.chat_display.config(state=tk.NORMAL)
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        
+        # 将Markdown格式转换为tkinter Text组件支持的格式
+        formatted_message = self.convert_markdown_to_text(message)
+        
+        self.chat_display.insert(tk.END, f"[{timestamp}] {sender}: {formatted_message}\n\n")
+        self.chat_display.config(state=tk.DISABLED)
+        self.chat_display.see(tk.END)  # 自动滚动到底部
+        
+        # 同时记录到对话历史
+        self.conversation_history.append({
+            "timestamp": timestamp,
+            "sender": sender,
+            "message": message
+        })
+    
+    def convert_markdown_to_text(self, markdown_text):
+        """将Markdown格式转换为普通文本（简化实现）"""
+        # 处理代码块标记（保留内容但移除标记）
+        text = re.sub(r'```.*?\n(.*?)```', r'\1', markdown_text, flags=re.DOTALL)
+        # 处理行内代码标记
+        text = re.sub(r'`(.*?)`', r'`\1`', text)
+        # 处理粗体标记
+        text = re.sub(r'\*\*(.*?)\*\*', r'*\1*', text)
+        # 处理斜体标记
+        text = re.sub(r'\*(.*?)\*', r'_\1_', text)
+        # 处理标题标记（简化处理）
+        text = re.sub(r'^### (.*?)$', r'\1', text, flags=re.MULTILINE)
+        text = re.sub(r'^## (.*?)$', r'\1', text, flags=re.MULTILINE)
+        text = re.sub(r'^# (.*?)$', r'\1', text, flags=re.MULTILINE)
+        # 处理链接标记
+        text = re.sub(r'\[(.*?)\]\((.*?)\)', r'\1(\2)', text)
+        # 处理列表标记
+        text = re.sub(r'^-\s+', r'* ', text, flags=re.MULTILINE)
+        text = re.sub(r'^\d+\.\s+', r'\g<0>', text, flags=re.MULTILINE)  # 保留数字列表格式
+        
+        return text
+    
+    def send_message(self):
+        """发送用户消息"""
+        user_text = self.user_input.get("1.0", tk.END).strip()
+        if not user_text:
+            return
+        
+        # 显示用户消息
+        self.display_message("用户", user_text)
+        
+        # 清空输入框
+        self.user_input.delete("1.0", tk.END)
+        
+        # 更新按钮为停止生成
+        self.send_button.config(text="停止", command=self.stop_generation)
+        
+        # 在新线程中处理AI响应
+        self.response_thread = threading.Thread(
+            target=self.get_ai_response, 
+            args=(user_text,)
+        )
+        self.response_thread.start()
+    
+    def stop_generation(self):
+        """停止AI生成"""
+        # 这里可以实现停止逻辑
+        self.display_message("系统", "已停止生成响应。")
+        self.send_button.config(text="发送", command=self.send_message)
+    
+    def process_command(self, user_message):
+        """处理系统命令"""
+        # 检查是否为系统命令
+        if user_message.lower().startswith('/create folder ') or user_message.lower().startswith('/create_dir '):
+            # 提取文件夹路径
+            folder_path = user_message[13:].strip()  # 移除 '/create folder ' 部分
+            try:
+                os.makedirs(folder_path, exist_ok=True)
+                return f"文件夹 '{folder_path}' 创建成功！"
+            except Exception as e:
+                return f"创建文件夹失败：{str(e)}"
+        elif user_message.lower().startswith('/create file '):
+            # 提取文件路径和内容（格式：/create file path/to/file.txt content here）
+            parts = user_message[13:].split(' ', 1)  # 移除 '/create file ' 部分
+            if len(parts) >= 2:
+                file_path, content = parts[0], parts[1]
+                try:
+                    with open(file_path, 'w', encoding='utf-8') as f:
+                        f.write(content)
+                    return f"文件 '{file_path}' 创建成功！"
+                except Exception as e:
+                    return f"创建文件失败：{str(e)}"
+            else:
+                return "错误：命令格式不正确。请使用 /create file path/to/file.txt content 格式。"
+        elif user_message.lower().startswith('/list dir ') or user_message.lower().startswith('/list files '):
+            # 列出目录内容
+            dir_path = user_message[10:].strip() if user_message.lower().startswith('/list files ') else user_message[10:].strip()
+            if os.path.exists(dir_path) and os.path.isdir(dir_path):
+                try:
+                    items = os.listdir(dir_path)
+                    if not items:
+                        return f"目录 '{dir_path}' 为空。"
+                    else:
+                        items_str = '\n'.join(items)
+                        return f"目录 '{dir_path}' 的内容：\n{items_str}"
+                except Exception as e:
+                    return f"列出目录内容失败：{str(e)}"
+            else:
+                return f"错误：目录 '{dir_path}' 不存在。"
+        elif user_message.lower() == '/help':
+            # 显示帮助信息
+            help_text = """
+可用的系统命令：
+/create folder <路径> - 创建新文件夹
+/create file <路径> <内容> - 创建新文件并写入内容
+/list dir <路径> - 列出目录内容
+/help - 显示此帮助信息
+            """
+            return help_text.strip()
+        return None  # 不是系统命令，返回None
+    
+    def execute_json_commands(self, json_commands):
+        """执行JSON格式的命令"""
+        executed_commands = []
+        for cmd in json_commands:
+            cmd_type = cmd.get("type")
+            cmd_params = cmd.get("params", {})
+            
+            if cmd_type == "create_file":
+                # 格式: {"type": "create_file", "params": {"path": "file.py", "content": "print('hello')"}}
+                file_path = cmd_params.get("path")
+                content = cmd_params.get("content")
+                try:
+                    with open(file_path, 'w', encoding='utf-8') as f:
+                        f.write(content)
+                    result = f"文件 '{file_path}' 创建成功！"
+                except Exception as e:
+                    result = f"创建文件失败：{str(e)}"
+                executed_commands.append(result)  # 只返回执行结果，不包含命令描述
+                
+            elif cmd_type == "create_folder":
+                # 格式: {"type": "create_folder", "params": {"path": "my_folder"}}
+                folder_path = cmd_params.get("path")
+                try:
+                    os.makedirs(folder_path, exist_ok=True)
+                    result = f"文件夹 '{folder_path}' 创建成功！"
+                except Exception as e:
+                    result = f"创建文件夹失败：{str(e)}"
+                executed_commands.append(result)  # 只返回执行结果，不包含命令描述
+                
+            elif cmd_type == "run_python":
+                # 格式: {"type": "run_python", "params": {"path": "script.py"}}
+                file_path = cmd_params.get("path")
+                result = self.run_python_file(f"/run python {file_path}")
+                executed_commands.append(result)  # 只返回执行结果，不包含命令描述
+                
+            elif cmd_type == "run_javascript":
+                # 格式: {"type": "run_javascript", "params": {"path": "script.js"}}
+                file_path = cmd_params.get("path")
+                result = self.run_javascript_file(file_path)
+                executed_commands.append(result)  # 只返回执行结果，不包含命令描述
+                
+            elif cmd_type == "run_java":
+                # 格式: {"type": "run_java", "params": {"path": "program.java"}}
+                file_path = cmd_params.get("path")
+                result = self.run_java_file(file_path)
+                executed_commands.append(result)  # 只返回执行结果，不包含命令描述
+                
+            elif cmd_type == "run_cpp":
+                # 格式: {"type": "run_cpp", "params": {"path": "program.cpp"}}
+                file_path = cmd_params.get("path")
+                result = self.run_cpp_file(file_path)
+                executed_commands.append(result)  # 只返回执行结果，不包含命令描述
+                
+            elif cmd_type == "run_c":
+                # 格式: {"type": "run_c", "params": {"path": "program.c"}}
+                file_path = cmd_params.get("path")
+                result = self.run_c_file(file_path)
+                executed_commands.append(result)  # 只返回执行结果，不包含命令描述
+                
+            elif cmd_type == "run_bash":
+                # 格式: {"type": "run_bash", "params": {"command": "ls -la"}}
+                command = cmd_params.get("command")
+                result = self.run_bash_command(command)
+                executed_commands.append(result)  # 只返回执行结果，不包含命令描述
+                
+            elif cmd_type == "run_cmd":
+                # 格式: {"type": "run_cmd", "params": {"command": "dir"}}
+                command = cmd_params.get("command")
+                # 检查是否为高危命令
+                if self.is_high_risk_command(command):
+                    # 需要用户确认
+                    self.display_message("系统", f"需要确认执行高危命令: {command}")
+                    # 在实际实现中，这里应该弹出一个确认对话框
+                    # 为了简单起见，我们暂时跳过高危命令
+                    result = f"跳过高危命令: {command} (需要用户确认)"
+                else:
+                    result = self.run_cmd_command(command)
+                executed_commands.append(result)  # 只返回执行结果，不包含命令描述
+                
+            elif cmd_type == "run_powershell":
+                # 格式: {"type": "run_powershell", "params": {"command": "Get-Process"}}
+                command = cmd_params.get("command")
+                # 检查是否为高危命令
+                if self.is_high_risk_powershell_command(command):
+                    # 需要用户确认
+                    self.display_message("系统", f"需要确认执行高危PowerShell命令: {command}")
+                    # 在实际实现中，这里应该弹出一个确认对话框
+                    # 为了简单起见，我们暂时跳过高危命令
+                    result = f"跳过高危PowerShell命令: {command} (需要用户确认)"
+                else:
+                    result = self.run_powershell_command(command)
+                executed_commands.append(result)  # 只返回执行结果，不包含命令描述
+                
+            elif cmd_type == "read_file":
+                # 格式: {"type": "read_file", "params": {"path": "file.py"}}
+                file_path = cmd_params.get("path")
+                result = self.read_file_content(f"/read file {file_path}")
+                executed_commands.append(result)  # 只返回执行结果，不包含命令描述
+                
+            elif cmd_type == "list_dir":
+                # 格式: {"type": "list_dir", "params": {"path": "directory"}}
+                dir_path = cmd_params.get("path")
+                result = self.process_command(f"/list dir {dir_path}")
+                executed_commands.append(result)  # 只返回执行结果，不包含命令描述
+                
+            elif cmd_type == "message":
+                # 格式: {"type": "message", "params": {"content": "This is a message"}}
+                content = cmd_params.get("content")
+                executed_commands.append(content)  # 返回消息内容
+        
+        return executed_commands
+
+    def is_high_risk_command(self, command):
+        """检查是否为高危CMD命令"""
+        high_risk_keywords = [
+            'del', 'rd', 'rmdir', 'format', 'diskpart', 'cipher', 'sfc',
+            'shutdown', 'logoff', 'taskkill', 'tasklist', 'net user',
+            'net localgroup', 'reg', 'dism', 'bcdedit', 'reagentc'
+        ]
+        command_lower = command.lower()
+        return any(keyword in command_lower for keyword in high_risk_keywords)
+
+    def is_high_risk_powershell_command(self, command):
+        """检查是否为高危PowerShell命令"""
+        high_risk_keywords = [
+            'remove-item', 'del', 'rm', 'rmdir', 'format-volume', 'clear-disk',
+            'remove-computer', 'restart-computer', 'stop-computer', 'logoff',
+            'remove-aduser', 'disable-adaccount', 'set-service', 'remove-itemproperty',
+            'clear-itemproperty', 'new-scheduledjoboption', 'invoke-wmimethod',
+            'remove-process', 'kill', 'reg delete', 'fsutil behavior set'
+        ]
+        command_lower = command.lower()
+        return any(keyword in command_lower for keyword in high_risk_keywords)
+
+    def run_javascript_file(self, file_path):
+        """运行JavaScript文件"""
+        import subprocess
+        try:
+            result = subprocess.run(
+                ["node", file_path],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            
+            if result.returncode == 0:
+                return f"JavaScript文件运行成功！\n输出:\n{result.stdout}"
+            else:
+                return f"JavaScript文件运行失败！\n错误:\n{result.stderr}"
+        except subprocess.TimeoutExpired:
+            return "错误：JavaScript文件运行超时（超过30秒）"
+        except FileNotFoundError:
+            return "错误：未找到Node.js。请确保已安装Node.js并添加到系统PATH中。"
+        except Exception as e:
+            return f"执行JavaScript文件时发生错误: {str(e)}"
+
+    def run_java_file(self, file_path):
+        """运行Java文件"""
+        import subprocess
+        import os
+        try:
+            # 获取文件目录和文件名
+            file_dir = os.path.dirname(file_path)
+            file_name = os.path.basename(file_path)
+            class_name = os.path.splitext(file_name)[0]
+            
+            # 编译Java文件
+            compile_result = subprocess.run(
+                ["javac", file_path],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                cwd=file_dir or '.'
+            )
+            
+            if compile_result.returncode != 0:
+                return f"Java文件编译失败！\n错误:\n{compile_result.stderr}"
+            
+            # 运行编译后的类
+            run_result = subprocess.run(
+                ["java", class_name],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                cwd=file_dir or '.'
+            )
+            
+            if run_result.returncode == 0:
+                return f"Java程序运行成功！\n输出:\n{run_result.stdout}"
+            else:
+                return f"Java程序运行失败！\n错误:\n{run_result.stderr}"
+        except subprocess.TimeoutExpired:
+            return "错误：Java程序运行超时（超过30秒）"
+        except FileNotFoundError:
+            return "错误：未找到Java编译器或运行时。请确保已安装Java并添加到系统PATH中。"
+        except Exception as e:
+            return f"执行Java文件时发生错误: {str(e)}"
+
+    def run_cpp_file(self, file_path):
+        """运行C++文件"""
+        import subprocess
+        import os
+        try:
+            # 生成输出文件名
+            output_path = os.path.splitext(file_path)[0] + '.exe' if os.name == 'nt' else os.path.splitext(file_path)[0]
+            
+            # 编译C++文件
+            compile_result = subprocess.run(
+                ["g++", "-o", output_path, file_path],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            
+            if compile_result.returncode != 0:
+                return f"C++文件编译失败！\n错误:\n{compile_result.stderr}"
+            
+            # 运行编译后的程序
+            run_result = subprocess.run(
+                [output_path],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            
+            # 删除编译后的可执行文件
+            try:
+                os.remove(output_path)
+            except:
+                pass  # 忽略删除失败
+            
+            if run_result.returncode == 0:
+                return f"C++程序运行成功！\n输出:\n{run_result.stdout}"
+            else:
+                return f"C++程序运行失败！\n错误:\n{run_result.stderr}"
+        except subprocess.TimeoutExpired:
+            return "错误：C++程序运行超时（超过30秒）"
+        except FileNotFoundError:
+            return "错误：未找到g++编译器。请确保已安装GCC编译器并添加到系统PATH中。"
+        except Exception as e:
+            return f"执行C++文件时发生错误: {str(e)}"
+
+    def run_c_file(self, file_path):
+        """运行C文件"""
+        import subprocess
+        import os
+        try:
+            # 生成输出文件名
+            output_path = os.path.splitext(file_path)[0] + '.exe' if os.name == 'nt' else os.path.splitext(file_path)[0]
+            
+            # 编译C文件
+            compile_result = subprocess.run(
+                ["gcc", "-o", output_path, file_path],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            
+            if compile_result.returncode != 0:
+                return f"C文件编译失败！\n错误:\n{compile_result.stderr}"
+            
+            # 运行编译后的程序
+            run_result = subprocess.run(
+                [output_path],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            
+            # 删除编译后的可执行文件
+            try:
+                os.remove(output_path)
+            except:
+                pass  # 忽略删除失败
+            
+            if run_result.returncode == 0:
+                return f"C程序运行成功！\n输出:\n{run_result.stdout}"
+            else:
+                return f"C程序运行失败！\n错误:\n{run_result.stderr}"
+        except subprocess.TimeoutExpired:
+            return "错误：C程序运行超时（超过30秒）"
+        except FileNotFoundError:
+            return "错误：未找到gcc编译器。请确保已安装GCC编译器并添加到系统PATH中。"
+        except Exception as e:
+            return f"执行C文件时发生错误: {str(e)}"
+    
+    def run_bash_command(self, command):
+        """运行bash命令"""
+        import subprocess
+        try:
+            result = subprocess.run(
+                command,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            
+            if result.returncode == 0:
+                return f"Bash命令执行成功！\n输出:\n{result.stdout}"
+            else:
+                return f"Bash命令执行失败！\n错误:\n{result.stderr}"
+        except subprocess.TimeoutExpired:
+            return "错误：Bash命令执行超时（超过30秒）"
+        except Exception as e:
+            return f"执行Bash命令时发生错误: {str(e)}"
+    
+    def run_cmd_command(self, command):
+        """运行cmd命令"""
+        import subprocess
+        try:
+            result = subprocess.run(
+                command,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            
+            if result.returncode == 0:
+                return f"CMD命令执行成功！\n输出:\n{result.stdout}"
+            else:
+                return f"CMD命令执行失败！\n错误:\n{result.stderr}"
+        except subprocess.TimeoutExpired:
+            return "错误：CMD命令执行超时（超过30秒）"
+        except Exception as e:
+            return f"执行CMD命令时发生错误: {str(e)}"
+    
+    def run_powershell_command(self, command):
+        """运行PowerShell命令"""
+        import subprocess
+        try:
+            result = subprocess.run(
+                ["powershell", "-Command", command],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            
+            if result.returncode == 0:
+                return f"PowerShell命令执行成功！\n输出:\n{result.stdout}"
+            else:
+                return f"PowerShell命令执行失败！\n错误:\n{result.stderr}"
+        except subprocess.TimeoutExpired:
+            return "错误：PowerShell命令执行超时（超过30秒）"
+        except FileNotFoundError:
+            return "错误：未找到PowerShell。请确保系统支持PowerShell。"
+        except Exception as e:
+            return f"执行PowerShell命令时发生错误: {str(e)}"
+
+    def extract_json_commands(self, ai_response):
+        """从AI响应中提取JSON格式的命令"""
+        import json
+        import re
+        
+        # 尝试从响应中提取JSON部分
+        json_match = re.search(r'```json\n(.*?)```', ai_response, re.DOTALL)
+        if json_match:
+            try:
+                json_str = json_match.group(1).strip()
+                commands = json.loads(json_str)
+                # 确保是列表格式
+                if isinstance(commands, dict):
+                    commands = [commands]
+                return commands
+            except json.JSONDecodeError:
+                pass
+        
+        # 如果没有找到JSON块，尝试直接解析整个响应
+        try:
+            commands = json.loads(ai_response.strip())
+            # 确保是列表格式
+            if isinstance(commands, dict):
+                commands = [commands]
+            return commands
+        except json.JSONDecodeError:
+            pass
+        
+        return []
+
+    def run_python_file(self, command):
+        """运行Python文件命令"""
+        import subprocess
+        try:
+            # 提取文件路径
+            file_path = command[12:].strip()  # 移除 '/run python ' 部分
+            
+            # 运行Python文件
+            result = subprocess.run(
+                ["python", file_path],
+                capture_output=True,
+                text=True,
+                timeout=30  # 30秒超时
+            )
+            
+            if result.returncode == 0:
+                return f"Python文件运行成功！\n输出:\n{result.stdout}"
+            else:
+                return f"Python文件运行失败！\n错误:\n{result.stderr}"
+        except subprocess.TimeoutExpired:
+            return "错误：Python文件运行超时（超过30秒）"
+        except Exception as e:
+            return f"执行Python文件时发生错误: {str(e)}"
+
+    def analyze_and_fix_code(self, file_path, error_message):
+        """分析代码错误并尝试自动修复（AI辅助）"""
+        try:
+            # 读取原始文件内容
+            with open(file_path, 'r', encoding='utf-8') as f:
+                original_code = f.read()
+            
+            # 构建AI请求来修复错误
+            fix_request = f"以下Python代码在运行时出现错误：\n错误信息：{error_message}\n代码内容：\n{original_code}\n\n请分析错误并提供修复后的代码。"
+            
+            # 使用AI API来获取修复建议
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.config['api_key']}"
+            }
+            
+            # 构建消息历史
+            messages = self.context_messages + [{"role": "user", "content": fix_request}]
+            
+            data = {
+                "model": self.config["model"],
+                "messages": messages,
+                "temperature": 0.3  # 降低温度以获得更准确的修复
+            }
+            
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            
+            # 创建不使用系统代理的会话
+            session = requests.Session()
+            session.trust_env = False
+            
+            response = session.post(
+                self.config["api_url"],
+                headers=headers,
+                json=data,
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                try:
+                    ai_fix_suggestion = result["choices"][0]["message"]["content"]
+                    
+                    # 这里可以进一步解析AI的修复建议并应用
+                    # 简单实现：返回AI建议
+                    return ai_fix_suggestion
+                except (KeyError, IndexError):
+                    return f"无法解析AI修复建议: {result}"
+            else:
+                return f"AI修复请求失败：{response.status_code} - {response.text}"
+        except Exception as e:
+            return f"自动修复过程中发生错误: {str(e)}"
+
+    def read_file_content(self, command):
+        """读取文件内容命令"""
+        try:
+            # 提取文件路径
+            file_path = command[11:].strip()  # 移除 '/read file ' 部分
+            
+            # 读取文件内容
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            return f"文件 '{file_path}' 的内容:\n{content[:1000]}..." if len(content) > 1000 else f"文件 '{file_path}' 的内容:\n{content}"
+        except Exception as e:
+            return f"读取文件时发生错误: {str(e)}"
+
+    def get_ai_response(self, user_message):
+        """获取AI的响应"""
+        # 首先检查是否为系统命令
+        command_result = self.process_command(user_message)
+        if command_result:
+            self.root.after(0, lambda: self.display_message("系统", command_result))
+            self.root.after(0, lambda: self.send_button.config(text="发送", command=self.send_message))
+            return
+
+        # 检查配置是否完整
+        if not self.config.get("api_url") or not self.config.get("api_key") or not self.config.get("model"):
+            error_msg = "错误：请先在设置中配置API URL、API Key和模型名称！"
+            self.root.after(0, lambda: self.display_message("系统", error_msg))
+            self.root.after(0, lambda: self.send_button.config(text="发送", command=self.send_message))
+            return
+        
+        # 检查是否为编程请求，如果是，则修改提示以要求AI先生成To Do列表
+        programming_keywords = ['编程', '代码', '写一个', '创建', '开发', '实现', '程序', '脚本', 'project', 'code', '开发', '编写', '函数', '类', '模块', '算法', '功能', '运行', '测试', '调试', '错误', 'bug', '修复', '检查', '执行']
+        is_programming_request = any(keyword in user_message.lower() for keyword in programming_keywords)
+        
+        # 如果是编程请求，修改AI请求以要求生成To Do列表
+        if is_programming_request:
+            enhanced_prompt = f"{user_message}\n\n请按照以下步骤完成任务：\n1. 首先，提供一个To Do列表，详细说明需要完成的步骤\n2. 然后，按照To Do列表逐步执行\n\n你需要使用以下JSON格式输出所有命令：\n```json\n[\n  {{\n    \"type\": \"message\",\n    \"params\": {{ \"content\": \"任务说明\" }}\n  }},\n  {{\n    \"type\": \"create_file\",\n    \"params\": {{ \"path\": \"文件路径\", \"content\": \"文件内容\" }}\n  }},\n  {{\n    \"type\": \"create_folder\",\n    \"params\": {{ \"path\": \"文件夹路径\" }}\n  }},\n  {{\n    \"type\": \"run_python\",\n    \"params\": {{ \"path\": \"Python文件路径\" }}\n  }},\n  {{\n    \"type\": \"run_javascript\",\n    \"params\": {{ \"path\": \"JavaScript文件路径\" }}\n  }},\n  {{\n    \"type\": \"run_java\",\n    \"params\": {{ \"path\": \"Java文件路径\" }}\n  }},\n  {{\n    \"type\": \"run_cpp\",\n    \"params\": {{ \"path\": \"C++文件路径\" }}\n  }},\n  {{\n    \"type\": \"run_c\",\n    \"params\": {{ \"path\": \"C文件路径\" }}\n  }},\n  {{\n    \"type\": \"run_cmd\",\n    \"params\": {{ \"command\": \"CMD命令\" }}\n  }},\n  {{\n    \"type\": \"run_powershell\",\n    \"params\": {{ \"command\": \"PowerShell命令\" }}\n  }},\n  {{\n    \"type\": \"read_file\",\n    \"params\": {{ \"path\": \"文件路径\" }}\n  }},\n  {{\n    \"type\": \"list_dir\",\n    \"params\": {{ \"path\": \"目录路径\" }}\n  }}\n]\n```"
+            messages = self.context_messages + [{"role": "user", "content": enhanced_prompt}]
+        else:
+            # 使用原始消息
+            messages = self.context_messages + [{"role": "user", "content": user_message}]
+        
+        try:
+            # 根据API URL确定认证方式和请求格式
+            api_url = self.config["api_url"]
+            headers = {"Content-Type": "application/json"}
+            
+            # 对于OpenAI API风格的服务，使用Bearer认证
+            if "openai.com" in api_url or "api.openai.com" in api_url:
+                headers["Authorization"] = f"Bearer {self.config['api_key']}"
+            # 对于Azure OpenAI，可能需要不同的认证
+            elif "azure.com" in api_url or "openai.azure.com" in api_url:
+                headers["api-key"] = self.config['api_key']
+            # 对于其他API服务，也可以添加特定的处理
+            else:
+                headers["Authorization"] = f"Bearer {self.config['api_key']}"
+            
+            data = {
+                "model": self.config["model"],
+                "messages": messages,  # 使用上面已经定义的messages
+                "stream": False,  # 简单实现，不使用流式传输
+                "temperature": 0.7  # 添加温度参数，提高API兼容性
+            }
+            
+            # 发送API请求
+            print(f"正在向 {self.config['api_url']} 发送请求...")  # 调试信息
+            print(f"Headers: {headers}")  # 调试信息
+            print(f"Data: {data}")  # 调试信息
+            
+            try:
+                import urllib3
+                urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)  # 禁用SSL警告
+                
+                # 创建不使用系统代理的会话
+                session = requests.Session()
+                session.trust_env = False  # 不使用系统代理配置
+                
+                response = session.post(
+                    self.config["api_url"],
+                    headers=headers,
+                    json=data,
+                    timeout=60,  # 增加超时时间到60秒
+                    verify=False  # 禁用SSL验证（仅用于测试）
+                )
+                
+                print(f"收到响应，状态码: {response.status_code}")  # 调试信息
+                print(f"响应内容: {response.text}")  # 调试信息
+                
+                if response.status_code in [200, 201]:  # 一些API可能返回201
+                    try:
+                        result = response.json()
+                        # 尝试不同的响应格式
+                        try:
+                            ai_response = result["choices"][0]["message"]["content"]
+                        except (KeyError, IndexError):
+                            # 如果上面的路径失败，尝试其他常见的API响应格式
+                            try:
+                                ai_response = result["choices"][0]["text"]
+                            except (KeyError, IndexError):
+                                # 一些API可能有不同的结构
+                                try:
+                                    # 尝试Ollama或其他API的响应格式
+                                    ai_response = result["response"] if "response" in result else result.get("content", str(result))
+                                except:
+                                    # 如果还是失败，返回完整响应以帮助调试
+                                    ai_response = f"无法解析API响应: {result}"
+                        
+                        # 从AI响应中提取JSON命令
+                        json_commands = self.extract_json_commands(ai_response)
+                        
+                        if json_commands:
+                            # 显示用户的原始请求
+                            self.root.after(0, lambda: self.display_message("用户", user_message))
+                            
+                            # 逐步执行JSON命令并以可读方式显示
+                            executed_commands = self.execute_json_commands(json_commands)
+                            
+                            for idx, cmd in enumerate(json_commands):
+                                cmd_type = cmd.get("type", "")
+                                cmd_params = cmd.get("params", {})
+                                
+                                # 根据命令类型显示用户友好的消息
+                                if cmd_type == "create_file":
+                                    file_path = cmd_params.get("path", "未知路径")
+                                    content_preview = cmd_params.get("content", "")[:50] + "..." if len(cmd_params.get("content", "")) > 50 else cmd_params.get("content", "")
+                                    self.root.after(0, lambda path=file_path, content=content_preview: self.display_message("AI", f"正在创建文件: {path}\n内容预览: {content}"))
+                                elif cmd_type == "create_folder":
+                                    folder_path = cmd_params.get("path", "未知路径")
+                                    self.root.after(0, lambda path=folder_path: self.display_message("AI", f"正在创建文件夹: {path}"))
+                                elif cmd_type == "run_python":
+                                    file_path = cmd_params.get("path", "未知路径")
+                                    self.root.after(0, lambda path=file_path: self.display_message("AI", f"正在运行Python文件: {path}"))
+                                elif cmd_type == "run_javascript":
+                                    file_path = cmd_params.get("path", "未知路径")
+                                    self.root.after(0, lambda path=file_path: self.display_message("AI", f"正在运行JavaScript文件: {path}"))
+                                elif cmd_type == "run_java":
+                                    file_path = cmd_params.get("path", "未知路径")
+                                    self.root.after(0, lambda path=file_path: self.display_message("AI", f"正在运行Java文件: {path}"))
+                                elif cmd_type == "run_cpp":
+                                    file_path = cmd_params.get("path", "未知路径")
+                                    self.root.after(0, lambda path=file_path: self.display_message("AI", f"正在运行C++文件: {path}"))
+                                elif cmd_type == "run_c":
+                                    file_path = cmd_params.get("path", "未知路径")
+                                    self.root.after(0, lambda path=file_path: self.display_message("AI", f"正在运行C文件: {path}"))
+                                elif cmd_type == "run_bash":
+                                    command = cmd_params.get("command", "未知命令")
+                                    self.root.after(0, lambda cmd=command: self.display_message("AI", f"正在执行Bash命令: {cmd}"))
+                                elif cmd_type == "run_cmd":
+                                    command = cmd_params.get("command", "未知命令")
+                                    self.root.after(0, lambda cmd=command: self.display_message("AI", f"正在执行CMD命令: {cmd}"))
+                                elif cmd_type == "run_powershell":
+                                    command = cmd_params.get("command", "未知命令")
+                                    self.root.after(0, lambda cmd=command: self.display_message("AI", f"正在执行PowerShell命令: {cmd}"))
+                                elif cmd_type == "read_file":
+                                    file_path = cmd_params.get("path", "未知路径")
+                                    self.root.after(0, lambda path=file_path: self.display_message("AI", f"正在读取文件: {path}"))
+                                elif cmd_type == "list_dir":
+                                    dir_path = cmd_params.get("path", "未知路径")
+                                    self.root.after(0, lambda path=dir_path: self.display_message("AI", f"正在列出目录内容: {path}"))
+                                elif cmd_type == "message":
+                                    content = cmd_params.get("content", "")
+                                    self.root.after(0, lambda msg=content: self.display_message("AI", msg))
+                                
+                                # 显示执行结果
+                                if idx < len(executed_commands):
+                                    cmd_result = executed_commands[idx]
+                                    self.root.after(0, lambda result=cmd_result: self.display_message("系统", result.split('\n', 1)[1] if '\n' in result else result))  # 显示执行结果，但去掉命令描述
+                                    
+                                    # 将命令执行结果添加到上下文中，以保持对话连贯性
+                                    self.context_messages.append({"role": "system", "content": f"命令执行结果: {cmd_result}"})
+                                    
+                                    # 如果命令执行结果包含错误信息，考虑添加一个提示给AI
+                                    if "错误" in cmd_result or "失败" in cmd_result:
+                                        # 这里可以触发AI的错误修复逻辑
+                                        # 简单实现：只记录错误，实际的AI错误修复需要模型支持
+                                        pass
+                        else:
+                            # 如果没有JSON命令，正常显示AI的响应
+                            self.root.after(0, lambda: self.display_message("AI", ai_response))
+                            self.context_messages.append({"role": "assistant", "content": ai_response})
+                        
+                        # 更新上下文消息列表
+                        self.context_messages.append({"role": "user", "content": user_message})
+                        
+                        # 限制上下文长度为最近的10条消息（系统消息+9轮对话 = 10条）
+                        if len(self.context_messages) > 10:  # 系统消息(1) + 9轮对话(用户+AI各1条 = 9)
+                            self.context_messages = self.context_messages[:1] + self.context_messages[-9:]  # 保留系统消息+最近9轮对话
+                    except ValueError:  # JSON解析错误
+                        error_msg = f"无法解析API响应（非JSON格式）: {response.text}"
+                        self.root.after(0, lambda: self.display_message("系统", error_msg))
+                else:
+                    error_msg = f"API请求失败：{response.status_code} - {response.text}"
+                    self.root.after(0, lambda: self.display_message("系统", error_msg))
+            except requests.exceptions.RequestException as e:
+                print(f"请求异常: {e}")  # 调试信息
+                error_msg = f"API请求异常: {str(e)}"
+                self.root.after(0, lambda: self.display_message("系统", error_msg))
+            except Exception as e:
+                print(f"其他异常: {e}")  # 调试信息
+                error_msg = f"发生未知错误: {str(e)}"
+                self.root.after(0, lambda: self.display_message("系统", error_msg))
+                
+        except requests.exceptions.Timeout:
+            error_msg = "错误：API请求超时，请检查网络连接或API地址是否正确。"
+            self.root.after(0, lambda: self.display_message("系统", error_msg))
+        except requests.exceptions.ConnectionError:
+            error_msg = "错误：无法连接到API服务器，请检查API地址是否正确、网络连接是否正常。"
+            self.root.after(0, lambda: self.display_message("系统", error_msg))
+        except requests.exceptions.RequestException as e:
+            error_msg = f"错误：网络请求失败 - {str(e)}"
+            self.root.after(0, lambda: self.display_message("系统", error_msg))
+        except KeyError:
+            error_msg = "错误：API响应格式不正确，请检查API配置。"
+            self.root.after(0, lambda: self.display_message("系统", error_msg))
+        except Exception as e:
+            error_msg = f"错误：获取AI响应时发生未知错误 - {str(e)}"
+            self.root.after(0, lambda: self.display_message("系统", error_msg))
+        
+        # 恢复发送按钮
+        self.root.after(0, lambda: self.send_button.config(text="发送", command=self.send_message))
+    
+    def open_settings(self):
+        """打开设置页面"""
+        SettingsWindow(self)
+    
+    def load_config(self):
+        """加载配置文件"""
+        default_config = {
+            "api_url": "",
+            "api_key": "",
+            "model": "",
+            "system_prompt": "你是这台Windows电脑的AI助手。你的职责是：\n" +
+                             "1. 首先生成一个详细的任务To Do列表\n" +
+                             "2. 然后按步骤执行任务\n" +
+                             "3. 检查程序执行情况并自动修正错误\n\n" +
+                             "你是一个拥有系统访问权限的AI，可以对电脑进行任何操作，包括：\n" +
+                             "- 文件操作：创建、读取、修改、删除文件\n" +
+                             "- 目录操作：创建、删除文件夹，列出目录内容\n" +
+                             "- 程序执行：运行多种编程语言的代码\n" +
+                             "- 系统命令：执行CMD和PowerShell命令\n\n" +
+                             "对于高危命令（如删除文件、格式化、系统修改等），必须在执行前请求用户确认。\n\n" +
+                             "你必须使用JSON格式输出命令，格式如下：\n" +
+                             "```json\n" +
+                             "[\n" +
+                             "  {\n" +
+                             "    \"type\": \"message\",\n" +
+                             "    \"params\": { \"content\": \"任务说明\" }\n" +
+                             "  },\n" +
+                             "  {\n" +
+                             "    \"type\": \"create_file\",\n" +
+                             "    \"params\": { \"path\": \"文件路径\", \"content\": \"文件内容\" }\n" +
+                             "  },\n" +
+                             "  {\n" +
+                             "    \"type\": \"create_folder\",\n" +
+                             "    \"params\": { \"path\": \"文件夹路径\" }\n" +
+                             "  },\n" +
+                             "  {\n" +
+                             "    \"type\": \"run_python\",\n" +
+                             "    \"params\": { \"path\": \"Python文件路径\" }\n" +
+                             "  },\n" +
+                             "  {\n" +
+                             "    \"type\": \"run_javascript\",\n" +
+                             "    \"params\": { \"path\": \"JavaScript文件路径\" }\n" +
+                             "  },\n" +
+                             "  {\n" +
+                             "    \"type\": \"run_java\",\n" +
+                             "    \"params\": { \"path\": \"Java文件路径\" }\n" +
+                             "  },\n" +
+                             "  {\n" +
+                             "    \"type\": \"run_cpp\",\n" +
+                             "    \"params\": { \"path\": \"C++文件路径\" }\n" +
+                             "  },\n" +
+                             "  {\n" +
+                             "    \"type\": \"run_c\",\n" +
+                             "    \"params\": { \"path\": \"C文件路径\" }\n" +
+                             "  },\n" +
+                             "  {\n" +
+                             "    \"type\": \"run_bash\",\n" +
+                             "    \"params\": { \"command\": \"bash命令\" }\n" +
+                             "  },\n" +
+                             "  {\n" +
+                             "    \"type\": \"run_cmd\",\n" +
+                             "    \"params\": { \"command\": \"cmd命令\" }\n" +
+                             "  },\n" +
+                             "  {\n" +
+                             "    \"type\": \"run_powershell\",\n" +
+                             "    \"params\": { \"command\": \"PowerShell命令\" }\n" +
+                             "  },\n" +
+                             "  {\n" +
+                             "    \"type\": \"read_file\",\n" +
+                             "    \"params\": { \"path\": \"文件路径\" }\n" +
+                             "  },\n" +
+                             "  {\n" +
+                             "    \"type\": \"list_dir\",\n" +
+                             "    \"params\": { \"path\": \"目录路径\" }\n" +
+                             "  }\n" +
+                             "]\n" +
+                             "```\n\n" +
+                             "作为AI助手，你需要：\n" +
+                             "1. 分析需求并生成To Do列表\n" +
+                             "2. 按To Do 列表逐步执行任务\n" +
+                             "3. 通过run_*命令测试程序\n" +
+                             "4. 如果发现错误，使用read_file命令检查文件内容\n" +
+                             "5. 使用create_file命令自动修正错误\n" +
+                             "6. 对于高危命令，请求用户确认\n" +
+                             "7. 持续测试直到程序正常运行"
+        }
+        
+        if os.path.exists(self.config_file):
+            try:
+                with open(self.config_file, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                    # 合并默认配置和现有配置
+                    for key, value in default_config.items():
+                        if key not in config:
+                            config[key] = value
+                    return config
+            except Exception:
+                pass
+                
+        return default_config
+    
+    def save_config(self, config):
+        """保存配置文件"""
+        try:
+            with open(self.config_file, 'w', encoding='utf-8') as f:
+                json.dump(config, f, ensure_ascii=False, indent=2)
+            self.config = config
+            
+            # 如果系统提示词被修改，更新上下文消息
+            if config.get("system_prompt") != self.context_messages[0]["content"]:
+                # 保留其他上下文消息，只更新系统消息
+                old_context = self.context_messages[1:]  # 保留除系统消息外的所有消息
+                self.context_messages = [{"role": "system", "content": config["system_prompt"]}] + old_context
+            
+            return True
+        except Exception as e:
+            messagebox.showerror("错误", f"保存配置失败: {str(e)}")
+            return False
+    
+    def load_memory(self):
+        """加载记忆库"""
+        if os.path.exists(self.memory_file):
+            try:
+                with open(self.memory_file, 'r', encoding='utf-8') as f:
+                    self.memory = json.load(f)
+            except Exception:
+                pass
+        else:
+            # 创建必要的目录
+            os.makedirs(self.data_dir, exist_ok=True)
+            os.makedirs(self.onpython_dir, exist_ok=True)
+    
+    def save_memory(self):
+        """保存记忆库"""
+        try:
+            with open(self.memory_file, 'w', encoding='utf-8') as f:
+                json.dump(self.memory, f, ensure_ascii=False, indent=2)
+            return True
+        except Exception as e:
+            messagebox.showerror("错误", f"保存记忆库失败: {str(e)}")
+            return False
+
+
+class SettingsWindow:
+    def __init__(self, app):
+        self.app = app
+        self.window = tk.Toplevel(app.root)
+        self.window.title("设置")
+        self.window.geometry("500x400")
+        self.window.resizable(False, False)
+        
+        # 模态窗口 - 阻止主窗口交互
+        self.window.transient(app.root)
+        self.window.grab_set()
+        
+        self.create_settings_ui()
+    
+    def create_settings_ui(self):
+        """创建设置界面"""
+        # 创建笔记本控件用于分页
+        notebook = ttk.Notebook(self.window)
+        notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # API设置页面
+        api_frame = ttk.Frame(notebook)
+        notebook.add(api_frame, text="API设置")
+        
+        ttk.Label(api_frame, text="API地址:").grid(row=0, column=0, sticky=tk.W, padx=10, pady=10)
+        self.api_url_var = tk.StringVar(value=self.app.config.get("api_url", ""))
+        self.api_url_entry = ttk.Entry(api_frame, textvariable=self.api_url_var, width=50)
+        self.api_url_entry.grid(row=0, column=1, padx=10, pady=10)
+        
+        ttk.Label(api_frame, text="API Key:").grid(row=1, column=0, sticky=tk.W, padx=10, pady=10)
+        self.api_key_var = tk.StringVar(value=self.app.config.get("api_key", ""))
+        self.api_key_entry = ttk.Entry(api_frame, textvariable=self.api_key_var, width=50, show="*")
+        self.api_key_entry.grid(row=1, column=1, padx=10, pady=10)
+        
+        ttk.Label(api_frame, text="模型名称:").grid(row=2, column=0, sticky=tk.W, padx=10, pady=10)
+        self.model_var = tk.StringVar(value=self.app.config.get("model", ""))
+        self.model_entry = ttk.Entry(api_frame, textvariable=self.model_var, width=50)
+        self.model_entry.grid(row=2, column=1, padx=10, pady=10)
+        
+        # 系统提示词设置页面
+        prompt_frame = ttk.Frame(notebook)
+        notebook.add(prompt_frame, text="提示词设置")
+        
+        ttk.Label(prompt_frame, text="系统提示词:").pack(anchor=tk.W, padx=10, pady=(10, 0))
+        self.system_prompt_text = tk.Text(prompt_frame, height=15, width=60)
+        self.system_prompt_text.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # 设置当前值
+        self.system_prompt_text.insert("1.0", self.app.config.get("system_prompt", ""))
+        
+        # 按钮框架
+        button_frame = ttk.Frame(self.window)
+        button_frame.pack(fill=tk.X, padx=10, pady=10)
+        
+        # 保存按钮
+        save_button = ttk.Button(
+            button_frame, 
+            text="保存", 
+            command=self.save_settings
+        )
+        save_button.pack(side=tk.RIGHT, padx=(5, 0))
+        
+        # 取消按钮
+        cancel_button = ttk.Button(
+            button_frame, 
+            text="取消", 
+            command=self.window.destroy
+        )
+        cancel_button.pack(side=tk.RIGHT)
+    
+    def save_settings(self):
+        """保存设置"""
+        # 获取系统提示词
+        system_prompt = self.system_prompt_text.get("1.0", tk.END).strip()
+        
+        # 创建新的配置字典
+        new_config = {
+            "api_url": self.api_url_var.get(),
+            "api_key": self.api_key_var.get(),
+            "model": self.model_var.get(),
+            "system_prompt": system_prompt
+        }
+        
+        # 保存配置
+        if self.app.save_config(new_config):
+            messagebox.showinfo("成功", "设置已保存！")
+            self.window.destroy()
+
+
+if __name__ == "__main__":
+    try:
+        print("正在启动OnPython AI (OPAI)...")
+        root = tk.Tk()
+        print("Tkinter根窗口已创建")
+        app = OPAIApp(root)
+        print("OPAI应用实例已创建")
+        print("进入主事件循环...")
+        root.mainloop()
+        print("主事件循环已退出，程序结束")
+    except Exception as e:
+        print(f"启动OPAI时发生错误: {e}")
+        import traceback
+        traceback.print_exc()
