@@ -23,7 +23,9 @@ class OPAIApp:
         self.onpython_dir = os.path.join(self.data_dir, "OnPython")
         
         # 记忆库存储路径
-        self.memory_file = "memory.json"
+        self.memory_dir = os.path.join(self.data_dir, "Memory")
+        self.short_term_memory_file = os.path.join(self.memory_dir, "short_term_memory.json")
+        self.long_term_memory_file = os.path.join(self.memory_dir, "long_term_memory.json")
         self.memory = {
             "programs": {},  # 已导入的程序
             "summaries": []  # 对话总结
@@ -186,26 +188,260 @@ class OPAIApp:
     
     def start_memory_summarization(self):
         """启动记忆库定期总结任务"""
-        # 每30分钟执行一次总结任务（实际应用中可能需要更长的时间间隔）
-        self.root.after(30 * 60 * 1000, self.create_memory_summary)  # 30分钟 = 30*60*1000毫秒
-    
+        # 使用配置文件中的对话保存时间间隔
+        save_interval_minutes = self.config.get("conversation_save_interval", 30)  # 默认30分钟
+        save_interval_ms = save_interval_minutes * 60 * 1000  # 转换为毫秒
+        self.root.after(save_interval_ms, self.create_memory_summary)
+
+        # 启动记忆库整理任务
+        self.start_memory整理()
+
+    def start_memory整理(self):
+        """启动记忆库定期整理任务"""
+        # 使用配置文件中的记忆整理时间间隔
+        整理_interval_minutes = self.config.get("memory整理_interval", 60)  # 默认60分钟
+        整理_interval_ms = 整理_interval_minutes * 60 * 1000  # 转换为毫秒
+        self.root.after(整理_interval_ms, self.整理_memory)
+
+    def 整理_memory(self):
+        """整理短期记忆，使用AI来评估重要性并保存到长期记忆库"""
+        # 分析对话历史，提取信息供AI评估
+        reference_conversations = self.extract_important_conversations()
+
+        if reference_conversations:
+            # 使用AI来判断哪些对话是重要的，需要保存到长期记忆
+            self.request_ai_memory_evaluation(reference_conversations)
+        else:
+            print("没有足够的对话历史来进行记忆评估")
+
+        print(f"记忆库整理完成，当前长期记忆库大小: {len(self.memory['long_term_memory'])}")
+
+        # 继续安排下一次整理任务（使用新配置的时间间隔）
+        # 重新计算时间间隔以确保使用最新配置
+        整理_interval_minutes = self.config.get("memory整理_interval", 60)  # 重新获取当前配置
+        整理_interval_ms = 整理_interval_minutes * 60 * 1000
+        self.root.after(整理_interval_ms, self.整理_memory)  # 重新安排任务
+
+    def request_ai_memory_evaluation(self, reference_conversations):
+        """请求AI评估哪些对话重要并需要保存到长期记忆"""
+        # 构建AI请求，询问哪些对话是重要的
+        memory_content = "请分析以下对话历史，识别出重要、有价值或需要长期记住的信息：\n\n"
+
+        for idx, conv in enumerate(reference_conversations, 1):
+            memory_content += f"{idx}. [{conv['timestamp']}] {conv['sender']}: {conv['message']}\n"
+
+        memory_content += "\n请识别并总结出重要信息，这些信息应该具有长期价值，比如：\n"
+        memory_content += "- 个人偏好和喜好\n"
+        memory_content += "- 重要的事实和数据\n"
+        memory_content += "- 重要的承诺或约定\n"
+        memory_content += "- 技术知识和解决方案\n"
+        memory_content += "- 重要的人生事件或经验\n\n"
+        memory_content += "请按照JSON格式返回重要信息，格式如下：\n"
+        memory_content += "[\n"
+        memory_content += "  {\n"
+        memory_content += "    \"content\": \"重要信息内容\",\n"
+        memory_content += "    \"tags\": [\"标签1\", \"标签2\"]\n"
+        memory_content += "  }\n"
+        memory_content += "]"
+
+        # 创建一个临时的消息列表用于API请求
+        temp_messages = [
+            {"role": "system", "content": self.config["system_prompt"]},
+            {"role": "user", "content": memory_content}
+        ]
+
+        # 检查配置是否完整
+        if not self.config.get("api_url") or not self.config.get("api_key") or not self.config.get("model"):
+            print("无法评估记忆：API配置不完整")
+            return
+
+        try:
+            # 准备API请求
+            headers = {"Content-Type": "application/json"}
+
+            # 对于OpenAI API风格的服务，使用Bearer认证
+            if "openai.com" in self.config["api_url"] or "api.openai.com" in self.config["api_url"]:
+                headers["Authorization"] = f"Bearer {self.config['api_key']}"
+            # 对于Azure OpenAI
+            elif "azure.com" in self.config["api_url"] or "openai.azure.com" in self.config["api_url"]:
+                headers["api-key"] = self.config['api_key']
+            # 对于其他API服务
+            else:
+                headers["Authorization"] = f"Bearer {self.config['api_key']}"
+
+            data = {
+                "model": self.config["model"],
+                "messages": temp_messages,
+                "temperature": 0.3  # 较低的temperature以获得更准确的分析
+            }
+
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+            # 创建不使用系统代理的会话
+            session = requests.Session()
+            session.trust_env = False
+
+            response = session.post(
+                self.config["api_url"],
+                headers=headers,
+                json=data,
+                timeout=60
+            )
+
+            if response.status_code == 200:
+                result = response.json()
+                try:
+                    ai_response = result["choices"][0]["message"]["content"]
+
+                    # 尝试解析AI返回的JSON格式
+                    import json as json_module
+                    import re
+
+                    # 查找JSON部分
+                    json_match = re.search(r'```json\n(.*?)```', ai_response, re.DOTALL)
+                    if json_match:
+                        json_str = json_match.group(1).strip()
+                    else:
+                        # 如果没有找到代码块，尝试直接解析响应
+                        json_str = ai_response.strip()
+
+                    try:
+                        important_items = json_module.loads(json_str)
+
+                        # 将AI识别的重要信息添加到长期记忆库
+                        for item in important_items:
+                            content = item.get("content")
+                            tags = item.get("tags", [])
+                            if content:
+                                self.add_to_long_term_memory(content, tags)
+
+                    except json_module.JSONDecodeError:
+                        print(f"无法解析AI记忆评估结果为JSON: {ai_response}")
+
+                except (KeyError, IndexError):
+                    print(f"无法从API响应中提取AI评估结果: {result}")
+            else:
+                print(f"AI记忆评估请求失败：{response.status_code} - {response.text}")
+
+        except Exception as e:
+            print(f"AI记忆评估过程中发生错误: {str(e)}")
+
+    def extract_important_conversations(self):
+        """从对话历史中提取重要对话，仅作为AI总结的参考"""
+        # 这个函数现在只用于提供给AI进行总结的参考信息
+        # 不再自动将信息添加到长期记忆库
+        important_items = []
+
+        # 获取最近的对话历史作为AI总结的参考
+        # 限制为最近的50条记录以避免上下文过长
+        recent_history = self.conversation_history[-50:] if len(self.conversation_history) > 50 else self.conversation_history
+
+        for entry in recent_history:
+            important_items.append({
+                "timestamp": entry.get("timestamp"),
+                "sender": entry.get("sender"),
+                "message": entry.get("message"),
+                "extracted_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            })
+
+        return important_items
+
+    def add_to_long_term_memory(self, content, tags=None):
+        """手动将重要信息添加到长期记忆库 - 只能通过AI总结或特殊指令调用"""
+        if tags is None:
+            tags = []
+
+        # 创建长期记忆条目
+        memory_entry = {
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "content": content,
+            "tags": tags,
+            "added_by": "AI_Summary"  # 标记为AI总结添加
+        }
+
+        # 将条目添加到长期记忆库
+        self.memory["long_term_memory"].append(memory_entry)
+
+        # 保存记忆库（不再限制条目数量）
+        self.save_memory()
+
+        print(f"已将信息添加到长期记忆库: {content[:50]}...")
+
+        return True
+
+    def calculate_similarity(self, text1, text2):
+        """计算两个文本之间的相似度（百分比）"""
+        # 导入difflib库用于计算文本相似度
+        import difflib
+
+        # 计算相似度比率（0-1之间的浮点数）
+        similarity_ratio = difflib.SequenceMatcher(None, text1, text2).ratio()
+
+        # 转换为百分比
+        similarity_percentage = similarity_ratio * 100
+
+        return similarity_percentage
+
+    def find_relevant_memory(self, user_input):
+        """根据用户输入查找相关的长期记忆"""
+        relevant_memories = []
+
+        # 获取相似度阈值
+        similarity_threshold = self.config.get("memory_similarity_threshold", 85)
+
+        # 遍历长期记忆库中的所有记忆
+        for memory_item in self.memory.get("long_term_memory", []):
+            # 对于新格式的记忆项，使用 'content' 字段
+            # 对于旧格式的记忆项，使用 'message' 字段
+            memory_text = memory_item.get("content", memory_item.get("message", ""))
+
+            # 计算用户输入与记忆的相似度
+            similarity = self.calculate_similarity(user_input, memory_text)
+
+            # 如果相似度超过阈值，则认为是相关记忆
+            if similarity >= similarity_threshold:
+                # 新格式的记忆项
+                if "content" in memory_item:
+                    relevant_memories.append({
+                        "timestamp": memory_item.get("timestamp"),
+                        "sender": memory_item.get("added_by", "Unknown"),
+                        "message": memory_item.get("content"),
+                        "similarity": similarity
+                    })
+                # 旧格式的记忆项
+                else:
+                    relevant_memories.append({
+                        "timestamp": memory_item.get("timestamp"),
+                        "sender": memory_item.get("sender"),
+                        "message": memory_item.get("message"),
+                        "similarity": similarity
+                    })
+
+        # 按相似度降序排序
+        relevant_memories.sort(key=lambda x: x["similarity"], reverse=True)
+
+        # 返回最相关的前5条记忆，避免上下文过长
+        return relevant_memories[:5]
+
     def create_memory_summary(self):
         """创建记忆库总结"""
         # 获取当前时间
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
+
         # 分析对话历史
         user_messages = [entry for entry in self.conversation_history if entry["sender"] == "用户"]
         ai_messages = [entry for entry in self.conversation_history if entry["sender"] == "AI"]
         system_messages = [entry for entry in self.conversation_history if entry["sender"] == "系统"]
-        
+
         # 生成总结内容
         summary_content = f"定期总结 - {current_time}\n"
         summary_content += f"- 本次会话期间，用户发送了 {len(user_messages)} 条消息\n"
         summary_content += f"- AI回复了 {len(ai_messages)} 条消息\n"
         summary_content += f"- 系统发送了 {len(system_messages)} 条消息\n"
         summary_content += f"- 当前已导入 {len(self.memory['programs'])} 个程序到记忆库\n"
-        
+        summary_content += f"- 长期记忆库中包含 {len(self.memory['long_term_memory'])} 条重要信息\n"
+
         # 如果有用户消息，添加最近的几条
         if user_messages:
             summary_content += "- 最近的用户请求:\n"
@@ -214,29 +450,85 @@ class OPAIApp:
             for msg in recent_user_msgs:
                 msg_preview = msg["message"][:50] + "..." if len(msg["message"]) > 50 else msg["message"]
                 summary_content += f"  * {msg_preview}\n"
-        
+
         # 创建总结条目
         summary = {
             "date": current_time,
             "type": "periodic_summary",
             "content": summary_content
         }
-        
+
         # 添加到记忆库的总结列表
         self.memory["summaries"].append(summary)
-        
+
         # 限制总结数量，只保留最近的10条
         if len(self.memory["summaries"]) > 10:
             self.memory["summaries"] = self.memory["summaries"][-10:]
-        
+
         # 保存记忆库
         self.save_memory()
-        
+
         # 显示提示信息（不直接显示在聊天窗口中，以免打扰用户）
         print(f"记忆库总结已创建于 {current_time}")
-        
-        # 继续设置下一次的总结任务
-        self.start_memory_summarization()
+
+        # 继续设置下一次的总结任务（使用新配置的时间间隔）
+        # 重新计算时间间隔以确保使用最新配置
+        save_interval_minutes = self.config.get("conversation_save_interval", 30)  # 重新获取当前配置
+        save_interval_ms = save_interval_minutes * 60 * 1000
+        self.root.after(save_interval_ms, self.create_memory_summary)  # 重新安排任务
+
+    def create_memory_summary(self):
+        """创建记忆库总结"""
+        # 获取当前时间
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        # 分析对话历史
+        user_messages = [entry for entry in self.conversation_history if entry["sender"] == "用户"]
+        ai_messages = [entry for entry in self.conversation_history if entry["sender"] == "AI"]
+        system_messages = [entry for entry in self.conversation_history if entry["sender"] == "系统"]
+
+        # 生成总结内容
+        summary_content = f"定期总结 - {current_time}\n"
+        summary_content += f"- 本次会话期间，用户发送了 {len(user_messages)} 条消息\n"
+        summary_content += f"- AI回复了 {len(ai_messages)} 条消息\n"
+        summary_content += f"- 系统发送了 {len(system_messages)} 条消息\n"
+        summary_content += f"- 当前已导入 {len(self.memory['programs'])} 个程序到记忆库\n"
+        summary_content += f"- 长期记忆库中包含 {len(self.memory['long_term_memory'])} 条重要信息\n"
+
+        # 如果有用户消息，添加最近的几条
+        if user_messages:
+            summary_content += "- 最近的用户请求:\n"
+            # 显示最近的3条用户消息
+            recent_user_msgs = user_messages[-3:]
+            for msg in recent_user_msgs:
+                msg_preview = msg["message"][:50] + "..." if len(msg["message"]) > 50 else msg["message"]
+                summary_content += f"  * {msg_preview}\n"
+
+        # 创建总结条目
+        summary = {
+            "date": current_time,
+            "type": "periodic_summary",
+            "content": summary_content
+        }
+
+        # 添加到记忆库的总结列表
+        self.memory["summaries"].append(summary)
+
+        # 限制总结数量，只保留最近的10条
+        if len(self.memory["summaries"]) > 10:
+            self.memory["summaries"] = self.memory["summaries"][-10:]
+
+        # 保存记忆库
+        self.save_memory()
+
+        # 显示提示信息（不直接显示在聊天窗口中，以免打扰用户）
+        print(f"记忆库总结已创建于 {current_time}")
+
+        # 继续设置下一次的总结任务（使用新配置的时间间隔）
+        # 重新计算时间间隔以确保使用最新配置
+        save_interval_minutes = self.config.get("conversation_save_interval", 30)  # 重新获取当前配置
+        save_interval_ms = save_interval_minutes * 60 * 1000
+        self.root.after(save_interval_ms, self.create_memory_summary)  # 重新安排任务
     
     def handle_enter_key(self, event):
         """处理回车键事件，如果同时按下Shift则换行，否则发送消息"""
@@ -437,24 +729,26 @@ class OPAIApp:
                 # 检查是否为高危命令
                 if self.is_high_risk_command(command):
                     # 需要用户确认
-                    self.display_message("系统", f"需要确认执行高危命令: {command}")
-                    # 在实际实现中，这里应该弹出一个确认对话框
-                    # 为了简单起见，我们暂时跳过高危命令
-                    result = f"跳过高危命令: {command} (需要用户确认)"
+                    confirmed = self.ask_user_confirmation(f"检测到高危CMD命令，是否执行？\n命令: {command}")
+                    if confirmed:
+                        result = self.run_cmd_command(command)
+                    else:
+                        result = f"用户取消执行高危命令: {command}"
                 else:
                     result = self.run_cmd_command(command)
                 executed_commands.append(result)  # 只返回执行结果，不包含命令描述
-                
+
             elif cmd_type == "run_powershell":
                 # 格式: {"type": "run_powershell", "params": {"command": "Get-Process"}}
                 command = cmd_params.get("command")
                 # 检查是否为高危命令
                 if self.is_high_risk_powershell_command(command):
                     # 需要用户确认
-                    self.display_message("系统", f"需要确认执行高危PowerShell命令: {command}")
-                    # 在实际实现中，这里应该弹出一个确认对话框
-                    # 为了简单起见，我们暂时跳过高危命令
-                    result = f"跳过高危PowerShell命令: {command} (需要用户确认)"
+                    confirmed = self.ask_user_confirmation(f"检测到高危PowerShell命令，是否执行？\n命令: {command}")
+                    if confirmed:
+                        result = self.run_powershell_command(command)
+                    else:
+                        result = f"用户取消执行高危PowerShell命令: {command}"
                 else:
                     result = self.run_powershell_command(command)
                 executed_commands.append(result)  # 只返回执行结果，不包含命令描述
@@ -477,6 +771,26 @@ class OPAIApp:
                 executed_commands.append(content)  # 返回消息内容
         
         return executed_commands
+
+    def ask_user_confirmation(self, message):
+        """弹出确认对话框，询问用户是否执行高危操作"""
+        import tkinter as tk
+        from tkinter import messagebox
+
+        # 创建一个临时的根窗口，如果不存在的话
+        temp_root = None
+        if not self.root.winfo_exists():
+            temp_root = tk.Tk()
+            temp_root.withdraw()  # 隐藏临时根窗口
+
+        try:
+            # 显示确认对话框
+            confirmed = messagebox.askyesno("高危命令确认", message)
+            return confirmed
+        finally:
+            # 如果我们创建了临时根窗口，则销毁它
+            if temp_root:
+                temp_root.destroy()
 
     def is_high_risk_command(self, command):
         """检查是否为高危CMD命令"""
@@ -853,24 +1167,168 @@ class OPAIApp:
             self.root.after(0, lambda: self.display_message("系统", error_msg))
             self.root.after(0, lambda: self.send_button.config(text="发送", command=self.send_message))
             return
-        
-        # 检查是否为编程请求，如果是，则修改提示以要求AI先生成To Do列表
+
+        # 检查是否为编程请求
         programming_keywords = ['编程', '代码', '写一个', '创建', '开发', '实现', '程序', '脚本', 'project', 'code', '开发', '编写', '函数', '类', '模块', '算法', '功能', '运行', '测试', '调试', '错误', 'bug', '修复', '检查', '执行']
         is_programming_request = any(keyword in user_message.lower() for keyword in programming_keywords)
-        
-        # 如果是编程请求，修改AI请求以要求生成To Do列表
+
+        # 首先，向AI询问是否需要查询记忆库
+        self.assess_memory_need(user_message, is_programming_request)
+
+    def assess_memory_need(self, user_message, is_programming_request):
+        """第一阶段：询问AI是否需要查询记忆库"""
+        # 构建一个消息询问AI是否需要查询记忆库
+        assessment_prompt = f"""
+请评估用户的问题 '{user_message}' 是否可能需要查询历史记忆来提供更好的回答。
+请按照以下JSON格式返回您的评估：
+```json
+{{
+  "requires_memory": true/false,
+  "reason": "为什么需要或不需要查询记忆"
+}}
+```
+如果用户询问之前提到过的事情、历史信息、个人偏好、之前创建的内容等，则很可能会需要查询记忆库。
+"""
+
+        # 构建评估消息
+        assessment_messages = self.context_messages + [{"role": "user", "content": assessment_prompt}]
+
+        # 发送评估请求
+        try:
+            headers = {"Content-Type": "application/json"}
+
+            # 根据API URL确定认证方式
+            api_url = self.config["api_url"]
+            if "openai.com" in api_url or "api.openai.com" in api_url:
+                headers["Authorization"] = f"Bearer {self.config['api_key']}"
+            elif "azure.com" in api_url or "openai.azure.com" in api_url:
+                headers["api-key"] = self.config['api_key']
+            else:
+                headers["Authorization"] = f"Bearer {self.config['api_key']}"
+
+            data = {
+                "model": self.config["model"],
+                "messages": assessment_messages,
+                "temperature": 0.1  # 低温度获得更准确的评估
+            }
+
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+            session = requests.Session()
+            session.trust_env = False
+
+            response = session.post(
+                self.config["api_url"],
+                headers=headers,
+                json=data,
+                timeout=30
+            )
+
+            if response.status_code == 200:
+                result = response.json()
+                try:
+                    assessment_response = result["choices"][0]["message"]["content"]
+
+                    # 解析AI的评估
+                    requires_memory = self.parse_memory_assessment(assessment_response)
+
+                    if requires_memory:
+                        # 如果AI认为需要查询记忆库，执行查询
+                        self.query_memory_then_respond(user_message, is_programming_request)
+                    else:
+                        # 如果不需要，直接生成回复
+                        self.generate_direct_response(user_message, is_programming_request)
+
+                except (KeyError, IndexError):
+                    print(f"无法从评估响应中提取信息: {result}")
+                    # 如果解析失败，仍然尝试查询记忆库（更安全的做法）
+                    self.query_memory_then_respond(user_message, is_programming_request)
+            else:
+                print(f"记忆需求评估请求失败: {response.status_code} - {response.text}")
+                # 如果评估失败，仍然执行查询
+                self.query_memory_then_respond(user_message, is_programming_request)
+
+        except Exception as e:
+            print(f"记忆需求评估过程中发生错误: {str(e)}")
+            # 如果评估失败，仍然执行查询
+            self.query_memory_then_respond(user_message, is_programming_request)
+
+    def parse_memory_assessment(self, assessment_response):
+        """解析AI的记忆需求评估"""
+        import json
+        import re
+
+        # 尝试从响应中提取JSON
+        json_match = re.search(r'```json\n(.*?)```', assessment_response, re.DOTALL)
+        if json_match:
+            try:
+                json_str = json_match.group(1).strip()
+                parsed = json.loads(json_str)
+                return parsed.get("requires_memory", False)
+            except json.JSONDecodeError:
+                pass
+
+        # 如果没有JSON块，尝试直接解析
+        try:
+            parsed = json.loads(assessment_response.strip())
+            return parsed.get("requires_memory", False)
+        except json.JSONDecodeError:
+            pass
+
+        # 如果都失败了，返回False，让系统继续查询
+        return True  # 在解析失败时，默认查询记忆以确保不遗漏重要信息
+
+    def query_memory_then_respond(self, user_message, is_programming_request):
+        """查询记忆库，然后生成最终回复"""
+        # 查找相关记忆
+        relevant_memory = self.find_relevant_memory(user_message)
+
+        # 生成最终回复
+        self.generate_response_with_memory(user_message, is_programming_request, relevant_memory)
+
+    def generate_direct_response(self, user_message, is_programming_request):
+        """直接生成回复（不需要记忆库信息）"""
+        # 按原逻辑处理
         if is_programming_request:
             enhanced_prompt = f"{user_message}\n\n请按照以下步骤完成任务：\n1. 首先，提供一个To Do列表，详细说明需要完成的步骤\n2. 然后，按照To Do列表逐步执行\n\n你需要使用以下JSON格式输出所有命令：\n```json\n[\n  {{\n    \"type\": \"message\",\n    \"params\": {{ \"content\": \"任务说明\" }}\n  }},\n  {{\n    \"type\": \"create_file\",\n    \"params\": {{ \"path\": \"文件路径\", \"content\": \"文件内容\" }}\n  }},\n  {{\n    \"type\": \"create_folder\",\n    \"params\": {{ \"path\": \"文件夹路径\" }}\n  }},\n  {{\n    \"type\": \"run_python\",\n    \"params\": {{ \"path\": \"Python文件路径\" }}\n  }},\n  {{\n    \"type\": \"run_javascript\",\n    \"params\": {{ \"path\": \"JavaScript文件路径\" }}\n  }},\n  {{\n    \"type\": \"run_java\",\n    \"params\": {{ \"path\": \"Java文件路径\" }}\n  }},\n  {{\n    \"type\": \"run_cpp\",\n    \"params\": {{ \"path\": \"C++文件路径\" }}\n  }},\n  {{\n    \"type\": \"run_c\",\n    \"params\": {{ \"path\": \"C文件路径\" }}\n  }},\n  {{\n    \"type\": \"run_cmd\",\n    \"params\": {{ \"command\": \"CMD命令\" }}\n  }},\n  {{\n    \"type\": \"run_powershell\",\n    \"params\": {{ \"command\": \"PowerShell命令\" }}\n  }},\n  {{\n    \"type\": \"read_file\",\n    \"params\": {{ \"path\": \"文件路径\" }}\n  }},\n  {{\n    \"type\": \"list_dir\",\n    \"params\": {{ \"path\": \"目录路径\" }}\n  }}\n]\n```"
             messages = self.context_messages + [{"role": "user", "content": enhanced_prompt}]
         else:
             # 使用原始消息
             messages = self.context_messages + [{"role": "user", "content": user_message}]
-        
+
+        # 发送API请求
+        self.send_api_request(messages, user_message)
+
+    def generate_response_with_memory(self, user_message, is_programming_request, relevant_memory):
+        """使用记忆信息生成回复"""
+        if relevant_memory:
+            # 创建一个包含相关记忆的系统消息
+            memory_context = "以下是与当前对话相关的长期记忆，供您参考：\n\n"
+            for idx, mem in enumerate(relevant_memory, 1):
+                memory_context += f"记忆 {idx}: [{mem['timestamp']}] {mem['sender']}: {mem['message']}\n"
+            memory_context += f"\n原始用户消息: {user_message}"
+
+            if is_programming_request:
+                enhanced_prompt = f"{memory_context}\n\n请按照以下步骤完成任务：\n1. 首先，提供一个To Do列表，详细说明需要完成的步骤\n2. 然后，按照To Do列表逐步执行\n\n你需要使用以下JSON格式输出所有命令：\n```json\n[\n  {{\n    \"type\": \"message\",\n    \"params\": {{ \"content\": \"任务说明\" }}\n  }},\n  {{\n    \"type\": \"create_file\",\n    \"params\": {{ \"path\": \"文件路径\", \"content\": \"文件内容\" }}\n  }},\n  {{\n    \"type\": \"create_folder\",\n    \"params\": {{ \"path\": \"文件夹路径\" }}\n  }},\n  {{\n    \"type\": \"run_python\",\n    \"params\": {{ \"path\": \"Python文件路径\" }}\n  }},\n  {{\n    \"type\": \"run_javascript\",\n    \"params\": {{ \"path\": \"JavaScript文件路径\" }}\n  }},\n  {{\n    \"type\": \"run_java\",\n    \"params\": {{ \"path\": \"Java文件路径\" }}\n  }},\n  {{\n    \"type\": \"run_cpp\",\n    \"params\": {{ \"path\": \"C++文件路径\" }}\n  }},\n  {{\n    \"type\": \"run_c\",\n    \"params\": {{ \"path\": \"C文件路径\" }}\n  }},\n  {{\n    \"type\": \"run_cmd\",\n    \"params\": {{ \"command\": \"CMD命令\" }}\n  }},\n  {{\n    \"type\": \"run_powershell\",\n    \"params\": {{ \"command\": \"PowerShell命令\" }}\n  }},\n  {{\n    \"type\": \"read_file\",\n    \"params\": {{ \"path\": \"文件路径\" }}\n  }},\n  {{\n    \"type\": \"list_dir\",\n    \"params\": {{ \"path\": \"目录路径\" }}\n  }}\n]\n```"
+                messages = self.context_messages + [{"role": "user", "content": enhanced_prompt}]
+            else:
+                # 对于非编程请求，也将相关记忆包含在内
+                messages = self.context_messages + [{"role": "user", "content": memory_context}]
+        else:
+            # 没有相关记忆，但长期记忆库非空，通知AI
+            messages = self.context_messages + [{"role": "user", "content": f"注意：长期记忆库中有 {len(self.memory['long_term_memory'])} 条记忆记录，但与当前查询的相似度未达到 {self.config.get('memory_similarity_threshold', 85)}% 的阈值。如果您觉得相关信息可能在记忆库中，请告知用户。\n\n{user_message}"}]
+
+        # 发送API请求
+        self.send_api_request(messages, user_message)
+
+    def send_api_request(self, messages, original_user_message):
+        """发送API请求并处理响应"""
         try:
             # 根据API URL确定认证方式和请求格式
             api_url = self.config["api_url"]
             headers = {"Content-Type": "application/json"}
-            
+
             # 对于OpenAI API风格的服务，使用Bearer认证
             if "openai.com" in api_url or "api.openai.com" in api_url:
                 headers["Authorization"] = f"Bearer {self.config['api_key']}"
@@ -880,27 +1338,27 @@ class OPAIApp:
             # 对于其他API服务，也可以添加特定的处理
             else:
                 headers["Authorization"] = f"Bearer {self.config['api_key']}"
-            
+
             data = {
                 "model": self.config["model"],
                 "messages": messages,  # 使用上面已经定义的messages
                 "stream": False,  # 简单实现，不使用流式传输
                 "temperature": 0.7  # 添加温度参数，提高API兼容性
             }
-            
+
             # 发送API请求
             print(f"正在向 {self.config['api_url']} 发送请求...")  # 调试信息
             print(f"Headers: {headers}")  # 调试信息
             print(f"Data: {data}")  # 调试信息
-            
+
             try:
                 import urllib3
                 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)  # 禁用SSL警告
-                
+
                 # 创建不使用系统代理的会话
                 session = requests.Session()
-                session.trust_env = False  # 不使用系统代理配置
-                
+                session.trust_env = False
+
                 response = session.post(
                     self.config["api_url"],
                     headers=headers,
@@ -908,10 +1366,10 @@ class OPAIApp:
                     timeout=60,  # 增加超时时间到60秒
                     verify=False  # 禁用SSL验证（仅用于测试）
                 )
-                
+
                 print(f"收到响应，状态码: {response.status_code}")  # 调试信息
                 print(f"响应内容: {response.text}")  # 调试信息
-                
+
                 if response.status_code in [200, 201]:  # 一些API可能返回201
                     try:
                         result = response.json()
@@ -930,21 +1388,21 @@ class OPAIApp:
                                 except:
                                     # 如果还是失败，返回完整响应以帮助调试
                                     ai_response = f"无法解析API响应: {result}"
-                        
+
                         # 从AI响应中提取JSON命令
                         json_commands = self.extract_json_commands(ai_response)
-                        
+
                         if json_commands:
                             # 显示用户的原始请求
-                            self.root.after(0, lambda: self.display_message("用户", user_message))
-                            
+                            self.root.after(0, lambda: self.display_message("用户", original_user_message))
+
                             # 逐步执行JSON命令并以可读方式显示
                             executed_commands = self.execute_json_commands(json_commands)
-                            
+
                             for idx, cmd in enumerate(json_commands):
                                 cmd_type = cmd.get("type", "")
                                 cmd_params = cmd.get("params", {})
-                                
+
                                 # 根据命令类型显示用户友好的消息
                                 if cmd_type == "create_file":
                                     file_path = cmd_params.get("path", "未知路径")
@@ -986,15 +1444,15 @@ class OPAIApp:
                                 elif cmd_type == "message":
                                     content = cmd_params.get("content", "")
                                     self.root.after(0, lambda msg=content: self.display_message("AI", msg))
-                                
+
                                 # 显示执行结果
                                 if idx < len(executed_commands):
                                     cmd_result = executed_commands[idx]
                                     self.root.after(0, lambda result=cmd_result: self.display_message("系统", result.split('\n', 1)[1] if '\n' in result else result))  # 显示执行结果，但去掉命令描述
-                                    
+
                                     # 将命令执行结果添加到上下文中，以保持对话连贯性
                                     self.context_messages.append({"role": "system", "content": f"命令执行结果: {cmd_result}"})
-                                    
+
                                     # 如果命令执行结果包含错误信息，考虑添加一个提示给AI
                                     if "错误" in cmd_result or "失败" in cmd_result:
                                         # 这里可以触发AI的错误修复逻辑
@@ -1004,10 +1462,10 @@ class OPAIApp:
                             # 如果没有JSON命令，正常显示AI的响应
                             self.root.after(0, lambda: self.display_message("AI", ai_response))
                             self.context_messages.append({"role": "assistant", "content": ai_response})
-                        
+
                         # 更新上下文消息列表
-                        self.context_messages.append({"role": "user", "content": user_message})
-                        
+                        self.context_messages.append({"role": "user", "content": original_user_message})
+
                         # 限制上下文长度为最近的10条消息（系统消息+9轮对话 = 10条）
                         if len(self.context_messages) > 10:  # 系统消息(1) + 9轮对话(用户+AI各1条 = 9)
                             self.context_messages = self.context_messages[:1] + self.context_messages[-9:]  # 保留系统消息+最近9轮对话
@@ -1025,7 +1483,7 @@ class OPAIApp:
                 print(f"其他异常: {e}")  # 调试信息
                 error_msg = f"发生未知错误: {str(e)}"
                 self.root.after(0, lambda: self.display_message("系统", error_msg))
-                
+
         except requests.exceptions.Timeout:
             error_msg = "错误：API请求超时，请检查网络连接或API地址是否正确。"
             self.root.after(0, lambda: self.display_message("系统", error_msg))
@@ -1041,7 +1499,7 @@ class OPAIApp:
         except Exception as e:
             error_msg = f"错误：获取AI响应时发生未知错误 - {str(e)}"
             self.root.after(0, lambda: self.display_message("系统", error_msg))
-        
+
         # 恢复发送按钮
         self.root.after(0, lambda: self.send_button.config(text="发送", command=self.send_message))
     
@@ -1055,6 +1513,9 @@ class OPAIApp:
             "api_url": "",
             "api_key": "",
             "model": "",
+            "conversation_save_interval": 30,  # 对话保存时间（分钟）
+            "memory整理_interval": 60,  # 记忆整理时间（分钟）
+            "memory_similarity_threshold": 85,  # 记忆相似度阈值（百分比）
             "system_prompt": "你是这台Windows电脑的AI助手。你的职责是：\n" +
                              "1. 首先生成一个详细的任务To Do列表\n" +
                              "2. 然后按步骤执行任务\n" +
@@ -1148,17 +1609,41 @@ class OPAIApp:
     
     def save_config(self, config):
         """保存配置文件"""
+        # 保存之前的配置用于比较
+        old_config = self.config.copy() if self.config else {}
+
         try:
             with open(self.config_file, 'w', encoding='utf-8') as f:
                 json.dump(config, f, ensure_ascii=False, indent=2)
             self.config = config
-            
+
             # 如果系统提示词被修改，更新上下文消息
             if config.get("system_prompt") != self.context_messages[0]["content"]:
                 # 保留其他上下文消息，只更新系统消息
                 old_context = self.context_messages[1:]  # 保留除系统消息外的所有消息
                 self.context_messages = [{"role": "system", "content": config["system_prompt"]}] + old_context
-            
+
+            # 如果记忆相关配置被修改，重新启动记忆整理任务
+            if (config.get("memory整理_interval") != old_config.get("memory整理_interval") or
+                config.get("conversation_save_interval") != old_config.get("conversation_save_interval")):
+
+                # 重新启动记忆整理任务以应用新配置
+                self.start_memory整理()
+
+                # 重新启动对话保存任务以应用新配置
+                # 为了做到这一点，我们需要重新启动主记忆整理任务
+                # 但要确保不会重复启动，所以我们重新设置计时器
+                try:
+                    # 停止之前的定期总结任务
+                    pass  # Tkinter的after任务无法直接取消，但新设置会覆盖它
+                except:
+                    pass
+
+                # 重新开始定期总结任务
+                save_interval_minutes = config.get("conversation_save_interval", 30)
+                save_interval_ms = save_interval_minutes * 60 * 1000
+                self.root.after(save_interval_ms, self.create_memory_summary)
+
             return True
         except Exception as e:
             messagebox.showerror("错误", f"保存配置失败: {str(e)}")
@@ -1166,22 +1651,78 @@ class OPAIApp:
     
     def load_memory(self):
         """加载记忆库"""
-        if os.path.exists(self.memory_file):
+        # 创建记忆目录
+        os.makedirs(self.memory_dir, exist_ok=True)
+
+        # 加载短期记忆（对话历史）
+        if os.path.exists(self.short_term_memory_file):
             try:
-                with open(self.memory_file, 'r', encoding='utf-8') as f:
-                    self.memory = json.load(f)
-            except Exception:
-                pass
+                with open(self.short_term_memory_file, 'r', encoding='utf-8') as f:
+                    saved_data = json.load(f)
+
+                # 加载对话历史
+                self.conversation_history = saved_data.get("conversation_history", [])
+            except Exception as e:
+                print(f"加载短期记忆时出错: {e}")
+                self.conversation_history = []
         else:
-            # 创建必要的目录
-            os.makedirs(self.data_dir, exist_ok=True)
-            os.makedirs(self.onpython_dir, exist_ok=True)
+            self.conversation_history = []
+
+        # 加载长期记忆
+        if os.path.exists(self.long_term_memory_file):
+            try:
+                with open(self.long_term_memory_file, 'r', encoding='utf-8') as f:
+                    saved_data = json.load(f)
+
+                # 加载程序信息和摘要
+                self.memory = saved_data.get("memory", {
+                    "programs": {},
+                    "summaries": []
+                })
+
+                # 加载长期记忆（直接作为独立列表）
+                self.memory["long_term_memory"] = saved_data.get("long_term_memory", [])
+            except Exception as e:
+                print(f"加载长期记忆时出错: {e}")
+                self.memory = {
+                    "programs": {},
+                    "summaries": [],
+                    "long_term_memory": []
+                }
+        else:
+            self.memory = {
+                "programs": {},
+                "summaries": [],
+                "long_term_memory": []
+            }
+
+        # 创建其他必要目录
+        os.makedirs(self.data_dir, exist_ok=True)
+        os.makedirs(self.onpython_dir, exist_ok=True)
     
     def save_memory(self):
-        """保存记忆库"""
+        """保存记忆库和对话历史"""
         try:
-            with open(self.memory_file, 'w', encoding='utf-8') as f:
-                json.dump(self.memory, f, ensure_ascii=False, indent=2)
+            # 保存短期记忆（对话历史）
+            short_term_data = {
+                "conversation_history": self.conversation_history
+            }
+
+            with open(self.short_term_memory_file, 'w', encoding='utf-8') as f:
+                json.dump(short_term_data, f, ensure_ascii=False, indent=2)
+
+            # 保存长期记忆
+            long_term_data = {
+                "memory": {
+                    "programs": self.memory.get("programs", {}),
+                    "summaries": self.memory.get("summaries", [])
+                },
+                "long_term_memory": self.memory.get("long_term_memory", [])
+            }
+
+            with open(self.long_term_memory_file, 'w', encoding='utf-8') as f:
+                json.dump(long_term_data, f, ensure_ascii=False, indent=2)
+
             return True
         except Exception as e:
             messagebox.showerror("错误", f"保存记忆库失败: {str(e)}")
@@ -1207,53 +1748,79 @@ class SettingsWindow:
         # 创建笔记本控件用于分页
         notebook = ttk.Notebook(self.window)
         notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-        
+
         # API设置页面
         api_frame = ttk.Frame(notebook)
         notebook.add(api_frame, text="API设置")
-        
+
         ttk.Label(api_frame, text="API地址:").grid(row=0, column=0, sticky=tk.W, padx=10, pady=10)
         self.api_url_var = tk.StringVar(value=self.app.config.get("api_url", ""))
         self.api_url_entry = ttk.Entry(api_frame, textvariable=self.api_url_var, width=50)
         self.api_url_entry.grid(row=0, column=1, padx=10, pady=10)
-        
+
         ttk.Label(api_frame, text="API Key:").grid(row=1, column=0, sticky=tk.W, padx=10, pady=10)
         self.api_key_var = tk.StringVar(value=self.app.config.get("api_key", ""))
         self.api_key_entry = ttk.Entry(api_frame, textvariable=self.api_key_var, width=50, show="*")
         self.api_key_entry.grid(row=1, column=1, padx=10, pady=10)
-        
+
         ttk.Label(api_frame, text="模型名称:").grid(row=2, column=0, sticky=tk.W, padx=10, pady=10)
         self.model_var = tk.StringVar(value=self.app.config.get("model", ""))
         self.model_entry = ttk.Entry(api_frame, textvariable=self.model_var, width=50)
         self.model_entry.grid(row=2, column=1, padx=10, pady=10)
-        
+
+        # 对话设置页面
+        conversation_frame = ttk.Frame(notebook)
+        notebook.add(conversation_frame, text="对话设置")
+
+        ttk.Label(conversation_frame, text="对话保存时间:").grid(row=0, column=0, sticky=tk.W, padx=10, pady=10)
+        self.conversation_save_interval_var = tk.StringVar(value=str(self.app.config.get("conversation_save_interval", 30)))
+        self.conversation_save_interval_spinbox = tk.Spinbox(conversation_frame, from_=1, to=1440, textvariable=self.conversation_save_interval_var, width=10)
+        self.conversation_save_interval_spinbox.grid(row=0, column=1, sticky=tk.W, padx=10, pady=10)
+        ttk.Label(conversation_frame, text="分钟 (范围: 1-1440，即1分钟到24小时)").grid(row=0, column=2, sticky=tk.W, padx=5, pady=10)
+
+        # 记忆库设置页面
+        memory_frame = ttk.Frame(notebook)
+        notebook.add(memory_frame, text="记忆库设置")
+
+        ttk.Label(memory_frame, text="记忆整理时间:").grid(row=0, column=0, sticky=tk.W, padx=10, pady=10)
+        self.memory整理_interval_var = tk.StringVar(value=str(self.app.config.get("memory整理_interval", 60)))
+        self.memory整理_interval_spinbox = tk.Spinbox(memory_frame, from_=1, to=10080, textvariable=self.memory整理_interval_var, width=10)  # 最大值为一周的分钟数
+        self.memory整理_interval_spinbox.grid(row=0, column=1, sticky=tk.W, padx=10, pady=10)
+        ttk.Label(memory_frame, text="分钟 (范围: 1-10080，即1分钟到7天)").grid(row=0, column=2, sticky=tk.W, padx=5, pady=10)
+
+        ttk.Label(memory_frame, text="记忆相似度阈值:").grid(row=1, column=0, sticky=tk.W, padx=10, pady=10)
+        self.memory_similarity_threshold_var = tk.StringVar(value=str(self.app.config.get("memory_similarity_threshold", 85)))
+        self.memory_similarity_threshold_spinbox = tk.Spinbox(memory_frame, from_=1, to=100, textvariable=self.memory_similarity_threshold_var, width=10)
+        self.memory_similarity_threshold_spinbox.grid(row=1, column=1, sticky=tk.W, padx=10, pady=10)
+        ttk.Label(memory_frame, text="% (范围: 1-100)").grid(row=1, column=2, sticky=tk.W, padx=5, pady=10)
+
         # 系统提示词设置页面
         prompt_frame = ttk.Frame(notebook)
         notebook.add(prompt_frame, text="提示词设置")
-        
+
         ttk.Label(prompt_frame, text="系统提示词:").pack(anchor=tk.W, padx=10, pady=(10, 0))
         self.system_prompt_text = tk.Text(prompt_frame, height=15, width=60)
         self.system_prompt_text.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-        
+
         # 设置当前值
         self.system_prompt_text.insert("1.0", self.app.config.get("system_prompt", ""))
-        
+
         # 按钮框架
         button_frame = ttk.Frame(self.window)
         button_frame.pack(fill=tk.X, padx=10, pady=10)
-        
+
         # 保存按钮
         save_button = ttk.Button(
-            button_frame, 
-            text="保存", 
+            button_frame,
+            text="保存",
             command=self.save_settings
         )
         save_button.pack(side=tk.RIGHT, padx=(5, 0))
-        
+
         # 取消按钮
         cancel_button = ttk.Button(
-            button_frame, 
-            text="取消", 
+            button_frame,
+            text="取消",
             command=self.window.destroy
         )
         cancel_button.pack(side=tk.RIGHT)
@@ -1262,15 +1829,18 @@ class SettingsWindow:
         """保存设置"""
         # 获取系统提示词
         system_prompt = self.system_prompt_text.get("1.0", tk.END).strip()
-        
+
         # 创建新的配置字典
         new_config = {
             "api_url": self.api_url_var.get(),
             "api_key": self.api_key_var.get(),
             "model": self.model_var.get(),
+            "conversation_save_interval": int(self.conversation_save_interval_var.get()),
+            "memory整理_interval": int(self.memory整理_interval_var.get()),
+            "memory_similarity_threshold": int(self.memory_similarity_threshold_var.get()),
             "system_prompt": system_prompt
         }
-        
+
         # 保存配置
         if self.app.save_config(new_config):
             messagebox.showinfo("成功", "设置已保存！")
