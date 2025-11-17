@@ -11,6 +11,22 @@ import requests
 # 导入用于处理Markdown的库
 import re
 
+# 导入系统通知库
+try:
+    from plyer import notification
+    PLYER_AVAILABLE = True
+except ImportError:
+    PLYER_AVAILABLE = False
+    print("提示：未安装plyer库，系统通知功能将不可用。请运行 'pip install plyer' 安装。")
+
+# 导入Windows通知库用于支持点击事件
+try:
+    from win10toast import ToastNotifier
+    WIN10TOAST_AVAILABLE = True
+except ImportError:
+    WIN10TOAST_AVAILABLE = False
+    print("提示：未安装win10toast库，点击通知打开程序功能将不可用。请运行 'pip install win10toast' 安装。")
+
 class OPAIApp:
     def __init__(self, root):
         self.root = root
@@ -105,10 +121,63 @@ class OPAIApp:
         
         # 显示欢迎信息
         self.display_message("系统", "欢迎使用OnPython AI (OPAI)！我可以帮助您编写程序、执行系统命令，或与您聊天。")
-        
+
         # 启动记忆库定期总结任务
         self.start_memory_summarization()
-    
+
+    def is_window_minimized(self):
+        """检查窗口是否最小化"""
+        return self.root.state() == 'iconic'
+
+    def send_notification(self, title, message):
+        """发送系统通知"""
+        # 优先使用win10toast库
+        if WIN10TOAST_AVAILABLE:
+            try:
+                toaster = ToastNotifier()
+                # 显示通知（注意：win10toast不直接支持点击回调）
+                toaster.show_toast(
+                    title=title,
+                    msg=message[:256],  # 限制消息长度
+                    duration=5,  # 持续5秒
+                    threaded=True  # 非阻塞
+                )
+                # 在通知显示之后，设置一个短延时，然后检查窗口是否需要激活
+                self.root.after(100, self.activate_window)
+            except Exception as e:
+                print(f"使用win10toast发送通知时出错: {e}")
+                # 如果win10toast失败，尝试使用plyer
+                self.send_notification_with_plyer(title, message)
+        elif PLYER_AVAILABLE:
+            self.send_notification_with_plyer(title, message)
+        else:
+            print("通知库不可用，无法发送系统通知")
+
+    def send_notification_with_plyer(self, title, message):
+        """使用plyer库发送系统通知"""
+        try:
+            app_name = "OnPython AI"
+
+            notification.notify(
+                title=title,
+                message=message[:256],  # 限制消息长度以避免通知显示问题
+                app_name=app_name,
+                timeout=5  # 通知显示5秒
+            )
+        except Exception as e:
+            print(f"使用plyer发送通知时出错: {e}")
+
+    def activate_window(self):
+        """激活程序窗口，将其带到前台"""
+        try:
+            # 恢复窗口（如果最小化）
+            self.root.deiconify()
+            # 将窗口带到前台
+            self.root.lift()
+            self.root.focus_force()
+        except Exception as e:
+            print(f"激活窗口时出错: {e}")
+
     def clear_context(self):
         """清除对话上下文，开始新的对话"""
         # 保留系统提示词，清除用户和AI的消息
@@ -542,20 +611,30 @@ class OPAIApp:
         """在对话记录框中显示消息"""
         self.chat_display.config(state=tk.NORMAL)
         timestamp = datetime.now().strftime("%H:%M:%S")
-        
+
         # 将Markdown格式转换为tkinter Text组件支持的格式
         formatted_message = self.convert_markdown_to_text(message)
-        
+
         self.chat_display.insert(tk.END, f"[{timestamp}] {sender}: {formatted_message}\n\n")
         self.chat_display.config(state=tk.DISABLED)
         self.chat_display.see(tk.END)  # 自动滚动到底部
-        
+
         # 同时记录到对话历史
         self.conversation_history.append({
             "timestamp": timestamp,
             "sender": sender,
             "message": message
         })
+
+        # 如果窗口最小化且发送者不是用户，则发送系统通知
+        if self.is_window_minimized() and sender != "用户":
+            # 创建简洁的通知标题和消息
+            title = "来自AI的消息"
+            # 简化消息内容，取前100个字符，并移除换行符
+            simple_message = message.replace('\n', ' ')[:100]
+            if len(message) > 100:
+                simple_message += "..."
+            self.send_notification(title, simple_message)
     
     def convert_markdown_to_text(self, markdown_text):
         """将Markdown格式转换为普通文本（简化实现）"""
