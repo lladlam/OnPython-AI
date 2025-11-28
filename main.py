@@ -16,12 +16,15 @@ class OPAIApp:
         self.root = root
         self.root.title("OnPython AI (OPAI)")
         self.root.geometry("800x600")
-        
+
+        # 主题配置
+        self.is_dark_theme = False
+
         # 配置文件路径
         self.config_file = "config.json"
         self.data_dir = "data"
         self.onpython_dir = os.path.join(self.data_dir, "OnPython")
-        
+
         # 记忆库存储路径
         self.memory_dir = os.path.join(self.data_dir, "Memory")
         self.short_term_memory_file = os.path.join(self.memory_dir, "short_term_memory.json")
@@ -30,23 +33,111 @@ class OPAIApp:
             "programs": {},  # 已导入的程序
             "summaries": []  # 对话总结
         }
-        
+
         # 加载配置
         self.config = self.load_config()
-        
+
+        # 检查是否启用暗色主题
+        self.is_dark_theme = self.config.get("dark_theme", False)
+
         # 初始化记忆库
         self.load_memory()
-        
+
         # 初始化对话历史记录
         self.conversation_history = []
-        
+
         # 初始化上下文消息列表（用于API调用）
         self.context_messages = [
             {"role": "system", "content": self.config["system_prompt"]}
         ]
-        
+
         # 创建主界面
         self.create_widgets()
+
+    def get_theme_colors(self):
+        """获取当前主题的颜色方案"""
+        if self.is_dark_theme:
+            return {
+                "bg": "#2d2d2d",
+                "fg": "#ffffff",
+                "text_bg": "#1e1e1e",
+                "text_fg": "#dcdcdc",
+                "input_bg": "#3c3c3c",
+                "input_fg": "#ffffff",
+                "button_bg": "#3c3c3c",
+                "button_fg": "#ffffff",
+                "highlight_bg": "#4d4d4d",
+                "highlight_fg": "#ffffff",
+                "system_fg": "#4ec9b0",  # 青色
+                "user_fg": "#9cdcfe",    # 浅蓝色
+                "ai_fg": "#dcdcaa",      # 浅黄色
+                "timestamp_fg": "#57a64a" # 绿色
+            }
+        else:
+            return {
+                "bg": "#f0f0f0",
+                "fg": "#000000",
+                "text_bg": "#ffffff",
+                "text_fg": "#000000",
+                "input_bg": "#ffffff",
+                "input_fg": "#000000",
+                "button_bg": "#e0e0e0",
+                "button_fg": "#000000",
+                "highlight_bg": "#d9d9d9",
+                "highlight_fg": "#000000",
+                "system_fg": "#008000",  # 深绿色
+                "user_fg": "#0000ff",    # 蓝色
+                "ai_fg": "#000000",      # 黑色
+                "timestamp_fg": "#808080" # 灰色
+            }
+
+    def apply_theme(self):
+        """应用当前主题到UI组件"""
+        colors = self.get_theme_colors()
+
+        # 应用到聊天显示区域
+        self.chat_display.config(
+            bg=colors["text_bg"],
+            fg=colors["text_fg"],
+            insertbackground=colors["fg"],  # 光标颜色
+            selectbackground=colors["highlight_bg"],
+            selectforeground=colors["highlight_fg"]
+        )
+
+        # 应用到输入区域
+        self.user_input.config(
+            bg=colors["input_bg"],
+            fg=colors["input_fg"],
+            insertbackground=colors["fg"],
+            selectbackground=colors["highlight_bg"],
+            selectforeground=colors["highlight_fg"]
+        )
+
+        # 设置窗口背景色（对于非ttk组件）
+        self.root.config(bg=colors["bg"])
+
+        # 应用到Frame组件（通过重新创建或更新）
+        self.chat_frame.config()  # ttk组件主要受系统主题影响
+        self.input_frame.config()
+
+    def detect_system_theme(self):
+        """检测系统主题"""
+        try:
+            # 尝试导入winreg来检测Windows系统主题
+            import winreg
+            # 检查注册表项来确定Windows主题
+            reg_path = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+            reg_key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, reg_path)
+
+            # AppsUseLightTheme值：1为浅色，0为深色
+            value, _ = winreg.QueryValueEx(reg_key, "AppsUseLightTheme")
+            winreg.CloseKey(reg_key)
+
+            # 如果值为0，表示使用深色主题
+            return value == 0
+        except:
+            # 如果无法检测系统主题，返回默认值（浅色）
+            return False
     
     def create_widgets(self):
         """创建主界面组件"""
@@ -102,9 +193,12 @@ class OPAIApp:
             command=self.open_settings
         )
         self.settings_button.pack(side=tk.RIGHT, padx=(0, 5))
+
+        # 应用主题
+        self.apply_theme()
         
         # 显示欢迎信息
-        self.display_message("系统", "欢迎使用OnPython AI (OPAI)！我可以帮助您编写程序、执行系统命令，或与您聊天。")
+        self.display_message("欢迎", "欢迎使用OnPython AI (OPAI)！我可以让AI帮助您编写程序、执行系统命令，或与您聊天。")
         
         # 启动记忆库定期总结任务
         self.start_memory_summarization()
@@ -542,14 +636,49 @@ class OPAIApp:
         """在对话记录框中显示消息"""
         self.chat_display.config(state=tk.NORMAL)
         timestamp = datetime.now().strftime("%H:%M:%S")
-        
+
         # 将Markdown格式转换为tkinter Text组件支持的格式
         formatted_message = self.convert_markdown_to_text(message)
-        
-        self.chat_display.insert(tk.END, f"[{timestamp}] {sender}: {formatted_message}\n\n")
+
+        # 获取主题颜色
+        colors = self.get_theme_colors()
+
+        # 根据发送者选择颜色
+        if sender == "系统":
+            color = colors["system_fg"]
+        elif sender == "用户":
+            color = colors["user_fg"]
+        elif sender == "AI":
+            color = colors["ai_fg"]
+        else:
+            color = colors["fg"]  # 默认颜色
+
+        # 获取起始位置，用于后续着色
+        start_pos = self.chat_display.index("end-2c")
+
+        # 插入时间戳
+        timestamp_text = f"[{timestamp}] "
+        self.chat_display.insert(tk.END, timestamp_text)
+
+        # 设置时间戳颜色
+        self.chat_display.tag_add("timestamp", start_pos, f"{start_pos}+{len(timestamp_text)}c")
+        self.chat_display.tag_config("timestamp", foreground=colors["timestamp_fg"])
+
+        # 插入发送者和消息
+        sender_text = f"{sender}: "
+        self.chat_display.insert(tk.END, sender_text)
+        self.chat_display.tag_add("sender", f"{start_pos}+{len(timestamp_text)}c", f"{start_pos}+{len(timestamp_text+sender_text)}c")
+        self.chat_display.tag_config("sender", foreground=color, font=("微软雅黑", 10, "bold"))
+
+        # 插入消息内容
+        message_start = f"{start_pos}+{len(timestamp_text+sender_text)}c"
+        self.chat_display.insert(tk.END, f"{formatted_message}\n\n")
+        self.chat_display.tag_add("message", message_start, f"{message_start}+{len(formatted_message)}c")
+        self.chat_display.tag_config("message", foreground=color)
+
         self.chat_display.config(state=tk.DISABLED)
         self.chat_display.see(tk.END)  # 自动滚动到底部
-        
+
         # 同时记录到对话历史
         self.conversation_history.append({
             "timestamp": timestamp,
@@ -578,35 +707,106 @@ class OPAIApp:
         text = re.sub(r'^\d+\.\s+', r'\g<0>', text, flags=re.MULTILINE)  # 保留数字列表格式
         
         return text
-    
+
+    def check_required_libs_and_tools(self):
+        """检查必需的库和工具"""
+        missing_items = []
+        optional_items = []
+
+        # 检查必需的第三方库
+        try:
+            import requests
+        except ImportError:
+            missing_items.append("requests")
+
+        # 检查可选的库和工具（用于不同编程语言支持）
+        # Python - 通常已经安装
+        try:
+            import subprocess
+            result = subprocess.run(["python", "--version"], capture_output=True, text=True, timeout=10)
+            if result.returncode != 0:
+                optional_items.append("Python解释器")
+        except:
+            optional_items.append("Python解释器")
+
+        # Node.js (用于JavaScript)
+        try:
+            result = subprocess.run(["node", "--version"], capture_output=True, text=True, timeout=10)
+            if result.returncode != 0:
+                optional_items.append("Node.js")
+        except FileNotFoundError:
+            optional_items.append("Node.js")
+
+        # Java
+        try:
+            result = subprocess.run(["java", "-version"], capture_output=True, text=True, timeout=10)
+            if result.returncode != 0:
+                optional_items.append("Java运行时")
+        except FileNotFoundError:
+            optional_items.append("Java运行时")
+
+        # GCC (用于C/C++)
+        try:
+            result = subprocess.run(["gcc", "--version"], capture_output=True, text=True, timeout=10)
+            if result.returncode != 0:
+                optional_items.append("GCC编译器")
+        except FileNotFoundError:
+            optional_items.append("GCC编译器")
+
+        # 检查是否存在缺失的必需库
+        if missing_items:
+            # 弹窗询问用户是否安装缺失的库
+            self.prompt_install_missing_libs(missing_items)
+        elif optional_items:
+            # 有可选功能无法使用，显示提示
+            self.show_optional_features_unavailable(optional_items)
+
+    def prompt_install_missing_libs(self, missing_libs):
+        """提示用户安装缺失的库"""
+        libs_str = ", ".join(missing_libs)
+        message = f"检测到以下必需库未安装: {libs_str}\n是否要自动安装这些库？"
+
+        # 创建确认窗口
+        InstallConfirmWindow(self, message, missing_libs, "必需")
+
+    def show_optional_features_unavailable(self, unavailable_features):
+        """显示哪些可选功能无法使用"""
+        features_str = ", ".join(unavailable_features)
+        message = f"以下功能可能无法使用，因为缺少相关工具: {features_str}\n\nAI可能无法执行相关编程语言的代码。"
+
+        # 创建提示窗口
+        InstallConfirmWindow(self, message, unavailable_features, "可选")
+
+# InstallConfirmWindow类结束
+
     def send_message(self):
         """发送用户消息"""
         user_text = self.user_input.get("1.0", tk.END).strip()
         if not user_text:
             return
-        
+
         # 显示用户消息
         self.display_message("用户", user_text)
-        
+
         # 清空输入框
         self.user_input.delete("1.0", tk.END)
-        
+
         # 更新按钮为停止生成
         self.send_button.config(text="停止", command=self.stop_generation)
-        
+
         # 在新线程中处理AI响应
         self.response_thread = threading.Thread(
-            target=self.get_ai_response, 
+            target=self.get_ai_response,
             args=(user_text,)
         )
         self.response_thread.start()
-    
+
     def stop_generation(self):
         """停止AI生成"""
         # 这里可以实现停止逻辑
         self.display_message("系统", "已停止生成响应。")
         self.send_button.config(text="发送", command=self.send_message)
-    
+
     def process_command(self, user_message):
         """处理系统命令"""
         # 检查是否为系统命令
@@ -1392,62 +1592,61 @@ class OPAIApp:
                         # 从AI响应中提取JSON命令
                         json_commands = self.extract_json_commands(ai_response)
 
+                        # 判断是否只包含message类型命令（纯对话）或包含实际执行命令
+                        only_message_commands = True
                         if json_commands:
+                            for cmd in json_commands:
+                                cmd_type = cmd.get("type", "")
+                                if cmd_type != "message":  # 如果存在非message类型的命令
+                                    only_message_commands = False
+                                    break
+
+                        # 根据命令类型决定如何显示AI的回复
+                        if json_commands and only_message_commands:
+                            # 如果只包含message命令，提取message内容显示，不显示JSON格式
+                            message_contents = []
+                            for cmd in json_commands:
+                                if cmd.get("type") == "message":
+                                    content = cmd.get("params", {}).get("content", "")
+                                    if content:
+                                        message_contents.append(content)
+
+                            if message_contents:
+                                # 将所有message内容合并显示
+                                ai_message = "\n".join(message_contents)
+                                self.root.after(0, lambda msg=ai_message: self.display_message("AI", msg))
+                                self.context_messages.append({"role": "assistant", "content": ai_message})
+                            else:
+                                # 如果没有有效的message内容但有JSON，仍需处理
+                                self.root.after(0, lambda: self.display_message("AI", ai_response))
+                                self.context_messages.append({"role": "assistant", "content": ai_response})
+                        elif json_commands and not only_message_commands:
+                            # 如果包含非message命令，先提取并显示message内容
+                            message_contents = []
+                            for cmd in json_commands:
+                                if cmd.get("type") == "message":
+                                    content = cmd.get("params", {}).get("content", "")
+                                    if content:
+                                        message_contents.append(content)
+
+                            if message_contents:
+                                # 将所有message内容合并显示
+                                ai_message = "\n".join(message_contents)
+                                self.root.after(0, lambda msg=ai_message: self.display_message("AI", msg))
+
                             # 显示用户的原始请求
                             self.root.after(0, lambda: self.display_message("用户", original_user_message))
 
-                            # 逐步执行JSON命令并以可读方式显示
+                            # 逐步执行JSON命令，只显示执行结果
                             executed_commands = self.execute_json_commands(json_commands)
 
                             for idx, cmd in enumerate(json_commands):
                                 cmd_type = cmd.get("type", "")
-                                cmd_params = cmd.get("params", {})
 
-                                # 根据命令类型显示用户友好的消息
-                                if cmd_type == "create_file":
-                                    file_path = cmd_params.get("path", "未知路径")
-                                    content_preview = cmd_params.get("content", "")[:50] + "..." if len(cmd_params.get("content", "")) > 50 else cmd_params.get("content", "")
-                                    self.root.after(0, lambda path=file_path, content=content_preview: self.display_message("AI", f"正在创建文件: {path}\n内容预览: {content}"))
-                                elif cmd_type == "create_folder":
-                                    folder_path = cmd_params.get("path", "未知路径")
-                                    self.root.after(0, lambda path=folder_path: self.display_message("AI", f"正在创建文件夹: {path}"))
-                                elif cmd_type == "run_python":
-                                    file_path = cmd_params.get("path", "未知路径")
-                                    self.root.after(0, lambda path=file_path: self.display_message("AI", f"正在运行Python文件: {path}"))
-                                elif cmd_type == "run_javascript":
-                                    file_path = cmd_params.get("path", "未知路径")
-                                    self.root.after(0, lambda path=file_path: self.display_message("AI", f"正在运行JavaScript文件: {path}"))
-                                elif cmd_type == "run_java":
-                                    file_path = cmd_params.get("path", "未知路径")
-                                    self.root.after(0, lambda path=file_path: self.display_message("AI", f"正在运行Java文件: {path}"))
-                                elif cmd_type == "run_cpp":
-                                    file_path = cmd_params.get("path", "未知路径")
-                                    self.root.after(0, lambda path=file_path: self.display_message("AI", f"正在运行C++文件: {path}"))
-                                elif cmd_type == "run_c":
-                                    file_path = cmd_params.get("path", "未知路径")
-                                    self.root.after(0, lambda path=file_path: self.display_message("AI", f"正在运行C文件: {path}"))
-                                elif cmd_type == "run_bash":
-                                    command = cmd_params.get("command", "未知命令")
-                                    self.root.after(0, lambda cmd=command: self.display_message("AI", f"正在执行Bash命令: {cmd}"))
-                                elif cmd_type == "run_cmd":
-                                    command = cmd_params.get("command", "未知命令")
-                                    self.root.after(0, lambda cmd=command: self.display_message("AI", f"正在执行CMD命令: {cmd}"))
-                                elif cmd_type == "run_powershell":
-                                    command = cmd_params.get("command", "未知命令")
-                                    self.root.after(0, lambda cmd=command: self.display_message("AI", f"正在执行PowerShell命令: {cmd}"))
-                                elif cmd_type == "read_file":
-                                    file_path = cmd_params.get("path", "未知路径")
-                                    self.root.after(0, lambda path=file_path: self.display_message("AI", f"正在读取文件: {path}"))
-                                elif cmd_type == "list_dir":
-                                    dir_path = cmd_params.get("path", "未知路径")
-                                    self.root.after(0, lambda path=dir_path: self.display_message("AI", f"正在列出目录内容: {path}"))
-                                elif cmd_type == "message":
-                                    content = cmd_params.get("content", "")
-                                    self.root.after(0, lambda msg=content: self.display_message("AI", msg))
-
-                                # 显示执行结果
-                                if idx < len(executed_commands):
+                                # 只对非message类型的命令显示执行结果
+                                if cmd_type != "message" and idx < len(executed_commands):
                                     cmd_result = executed_commands[idx]
+                                    # 只显示执行结果，不显示AI的意图
                                     self.root.after(0, lambda result=cmd_result: self.display_message("系统", result.split('\n', 1)[1] if '\n' in result else result))  # 显示执行结果，但去掉命令描述
 
                                     # 将命令执行结果添加到上下文中，以保持对话连贯性
@@ -1726,8 +1925,130 @@ class OPAIApp:
             return True
         except Exception as e:
             messagebox.showerror("错误", f"保存记忆库失败: {str(e)}")
-            return False
 
+class InstallConfirmWindow:
+    """安装确认窗口"""
+    def __init__(self, app, message, items, item_type):
+        self.app = app
+        self.items = items
+        self.item_type = item_type
+        
+        self.window = tk.Toplevel(app.root)
+        self.window.title("库/工具检查" if item_type == "可选" else "必需库检查")
+        self.window.geometry("500x200")
+        self.window.resizable(False, False)
+        
+        # 模态窗口
+        self.window.transient(app.root)
+        self.window.grab_set()
+        
+        # 创建界面
+        self.create_ui(message)
+    
+    def create_ui(self, message):
+        """创建界面"""
+        # 消息标签
+        msg_label = tk.Label(self.window, text=message, wraplength=450, justify=tk.LEFT)
+        msg_label.pack(pady=20, padx=20)
+        
+        # 按钮框架
+        button_frame = tk.Frame(self.window)
+        button_frame.pack(pady=20)
+        
+        if self.item_type == "必需":
+            # 对于必需库，提供安装选项
+            install_btn = tk.Button(button_frame, text="安装", command=self.start_installation, width=10)
+            install_btn.pack(side=tk.LEFT, padx=10)
+        
+        # 关闭按钮
+        close_btn = tk.Button(button_frame, text="关闭", command=self.window.destroy, width=10)
+        close_btn.pack(side=tk.LEFT, padx=10)
+    
+    def start_installation(self):
+        """开始安装过程"""
+        # 更改UI显示安装进度
+        for widget in self.window.winfo_children():
+            widget.destroy()
+        
+        # 显示安装进度
+        progress_label = tk.Label(self.window, text="正在安装库，请稍候...", font=("微软雅黑", 10))
+        progress_label.pack(pady=30)
+        
+        # 创建进度条
+        self.progress_var = tk.StringVar(value="准备安装...")
+        progress_detail = tk.Label(self.window, textvariable=self.progress_var, font=("微软雅黑", 9))
+        progress_detail.pack(pady=10)
+        
+        # 启动安装线程
+        install_thread = threading.Thread(target=self.install_packages)
+        install_thread.start()
+    
+    def install_packages(self):
+        """安装包"""
+        try:
+            import subprocess
+            import sys
+            
+            for i, item in enumerate(self.items):
+                self.progress_var.set(f"正在安装 {item} ({i+1}/{len(self.items)})...")
+                
+                # 更新GUI
+                self.app.root.update()
+                
+                if item == "requests":
+                    # 安装requests库
+                    result = subprocess.run([sys.executable, "-m", "pip", "install", "requests"],
+                                          capture_output=True, text=True)
+                
+                if result.returncode != 0:
+                    # 安装失败
+                    self.app.root.after(0, lambda: self.show_installation_result(f"安装 {item} 失败:\\n{result.stderr}", False))
+                    return
+            
+            # 所有安装完成
+            self.app.root.after(0, lambda: self.show_installation_result("所有库安装完成！", True))
+            
+        except Exception as e:
+            self.app.root.after(0, lambda: self.show_installation_result(f"安装过程中出现错误: {str(e)}", False))
+    
+    def show_installation_result(self, message, success):
+        """显示安装结果"""
+        # 清空窗口
+        for widget in self.window.winfo_children():
+            widget.destroy()
+        
+        # 显示结果消息
+        result_label = tk.Label(self.window, text=message, wraplength=450, justify=tk.LEFT)
+        result_label.pack(pady=30, padx=20)
+        
+        # 根据结果决定按钮
+        button_frame = tk.Frame(self.window)
+        button_frame.pack(pady=20)
+        
+        if success:
+            ok_btn = tk.Button(button_frame, text="确定", command=self.restart_app, width=10)
+            ok_btn.pack(side=tk.LEFT, padx=10)
+        else:
+            retry_btn = tk.Button(button_frame, text="重试", command=self.retry_installation, width=10)
+            retry_btn.pack(side=tk.LEFT, padx=10)
+        
+        close_btn = tk.Button(button_frame, text="关闭", command=self.window.destroy, width=10)
+        close_btn.pack(side=tk.LEFT, padx=10)
+    
+    def restart_app(self):
+        """重启应用"""
+        self.window.destroy()
+        self.app.root.destroy()
+        
+        # 重启应用
+        import subprocess
+        import sys
+        subprocess.Popen([sys.executable] + sys.argv)
+    
+    def retry_installation(self):
+        """重试安装"""
+        # 重新开始安装
+        self.start_installation()
 
 class SettingsWindow:
     def __init__(self, app):
@@ -1805,6 +2126,32 @@ class SettingsWindow:
         # 设置当前值
         self.system_prompt_text.insert("1.0", self.app.config.get("system_prompt", ""))
 
+        # 主题设置页面
+        theme_frame = ttk.Frame(notebook)
+        notebook.add(theme_frame, text="主题设置")
+
+        # 主题选择
+        ttk.Label(theme_frame, text="主题选择:").grid(row=0, column=0, sticky=tk.W, padx=10, pady=10)
+
+        # 创建主题选择变量
+        self.dark_theme_var = tk.BooleanVar(value=self.app.config.get("dark_theme", False))
+
+        # 主题选择单选按钮
+        light_theme_radio = ttk.Radiobutton(theme_frame, text="浅色主题", variable=self.dark_theme_var, value=False)
+        dark_theme_radio = ttk.Radiobutton(theme_frame, text="深色主题", variable=self.dark_theme_var, value=True)
+
+        light_theme_radio.grid(row=0, column=1, sticky=tk.W, padx=(10, 20), pady=10)
+        dark_theme_radio.grid(row=0, column=2, sticky=tk.W, padx=10, pady=10)
+
+        # 自动检测系统主题选项
+        self.auto_detect_theme_var = tk.BooleanVar(value=self.app.config.get("auto_detect_theme", False))
+        auto_detect_check = ttk.Checkbutton(
+            theme_frame,
+            text="根据系统主题自动调整",
+            variable=self.auto_detect_theme_var
+        )
+        auto_detect_check.grid(row=1, column=0, columnspan=3, sticky=tk.W, padx=10, pady=5)
+
         # 按钮框架
         button_frame = ttk.Frame(self.window)
         button_frame.pack(fill=tk.X, padx=10, pady=10)
@@ -1830,6 +2177,14 @@ class SettingsWindow:
         # 获取系统提示词
         system_prompt = self.system_prompt_text.get("1.0", tk.END).strip()
 
+        # 检测系统主题（如果启用自动检测）
+        dark_theme = self.dark_theme_var.get()
+        auto_detect_theme = self.auto_detect_theme_var.get()
+
+        if auto_detect_theme:
+            # 根据系统主题自动设置
+            dark_theme = self.app.detect_system_theme()
+
         # 创建新的配置字典
         new_config = {
             "api_url": self.api_url_var.get(),
@@ -1838,11 +2193,16 @@ class SettingsWindow:
             "conversation_save_interval": int(self.conversation_save_interval_var.get()),
             "memory整理_interval": int(self.memory整理_interval_var.get()),
             "memory_similarity_threshold": int(self.memory_similarity_threshold_var.get()),
-            "system_prompt": system_prompt
+            "system_prompt": system_prompt,
+            "dark_theme": dark_theme,
+            "auto_detect_theme": auto_detect_theme
         }
 
         # 保存配置
         if self.app.save_config(new_config):
+            # 应用主题更改
+            self.app.is_dark_theme = dark_theme
+            self.app.apply_theme()
             messagebox.showinfo("成功", "设置已保存！")
             self.window.destroy()
 
@@ -1853,6 +2213,19 @@ if __name__ == "__main__":
         root = tk.Tk()
         print("Tkinter根窗口已创建")
         app = OPAIApp(root)
+
+        # 检查是否需要根据系统主题自动设置
+        if app.config.get("auto_detect_theme", False):
+            system_theme = app.detect_system_theme()
+            if app.is_dark_theme != system_theme:
+                app.is_dark_theme = system_theme
+                app.apply_theme()
+
+        # 检查必要库和工具 - 在单独的线程中运行以避免阻塞UI
+        check_thread = threading.Thread(target=app.check_required_libs_and_tools)
+        check_thread.daemon = True  # 设置为守护线程
+        check_thread.start()
+
         print("OPAI应用实例已创建")
         print("进入主事件循环...")
         root.mainloop()
